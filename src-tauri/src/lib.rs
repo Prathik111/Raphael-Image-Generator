@@ -1048,7 +1048,7 @@ mod tests {
     fn reference_workflow_adds_exactly_one_lora_node_per_selected_lora() {
         let loras = vec![
             workflow_test_lora("l1","Akane",1.0),
-            workflow_test_lora("l2","accelerator\\anima-turbo-lora-v0.2",0.8),
+            workflow_test_lora("l2","turbo",0.8),
             workflow_test_lora("l3","third",0.6),
         ];
         let workflow = build_workflow(WorkflowRequest {
@@ -1060,7 +1060,7 @@ mod tests {
 
         for (id, previous, lora_name, weight) in [
             ("14","13","Anima\\Akane.safetensors",1.0),
-            ("15","14","accelerator\\anima-turbo-lora-v0.2.safetensors",0.8),
+            ("15","14","Anima\\turbo.safetensors",0.8),
             ("16","15","Anima\\third.safetensors",0.6),
         ] {
             assert_eq!(workflow[id]["class_type"], "LoraLoaderModelOnly");
