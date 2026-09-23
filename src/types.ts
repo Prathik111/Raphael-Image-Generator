@@ -91,3 +91,36 @@ export interface GenerationRecord {
   workflow: unknown;
   comfyPromptId?: string;
 }
+
+
+export type DemographicLevel = 'safe' | 'suggestive' | 'explicit' | 'no-limits';
+
+export interface DemographicPrompts {
+  safe: string;
+  suggestive: string;
+  explicit: string;
+  'no-limits': string;
+}
+
+export interface GenerationSettings {
+  llm: LlmSettings;
+  systemPrompt: string;
+  demographic: DemographicLevel;
+  demographicPrompts: DemographicPrompts;
+  maxLoras: number;
+  randomLoraMin: number;
+  randomLoraMax: number;
+  constraints: Constraints;
+  width: number;
+  height: number;
+  steps: number;
+  cfg: number;
+  sampler: string;
+}
+
+export interface WebHostInfo {
+  running: boolean;
+  port: number;
+  localUrl: string;
+  lanUrl: string;
+}
