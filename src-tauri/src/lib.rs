@@ -797,8 +797,26 @@ fn finalize_prompt_pair(req:FinalizePromptRequest)->Result<PromptPair,String>{
 
 fn comfy_relative_model_name(path: &str, folder: &str, fallback: &str) -> String {
     let normalized = path.replace('\\', "/");
+    let lower = normalized.to_lowercase();
+
+    // Prefer a path relative to ComfyUI's models directory.
+    // This handles both:
+    //   .../models/unet/anima/file.safetensors -> anima\\file.safetensors
+    //   .../models/anima/file.safetensors      -> anima\\file.safetensors
+    if let Some(models_index) = lower.find("/models/") {
+        let mut relative = normalized[models_index + "/models/".len()..].to_string();
+        let folder_prefix = format!("{}/", folder);
+        if relative.to_lowercase().starts_with(&folder_prefix) {
+            relative = relative[folder_prefix.len()..].to_string();
+        }
+        if !relative.is_empty() {
+            return relative.replace('/', "\\");
+        }
+    }
+
+    // Fallback for paths that cannot be anchored at a ComfyUI models root.
     let marker = format!("/{}/", folder);
-    if let Some(index) = normalized.to_lowercase().find(&marker) {
+    if let Some(index) = lower.find(&marker) {
         return normalized[index + marker.len()..].replace('/', "\\");
     }
     fallback.to_string()
@@ -1025,6 +1043,26 @@ mod tests {
             weight, activation_tags:vec![], tags:vec!["anima".into()],
             description:None, character:false, base_model:Some("anima".into()),
         }
+    }
+
+    #[test]
+    fn comfy_relative_model_name_preserves_nested_model_subfolders() {
+        assert_eq!(
+            comfy_relative_model_name(
+                "D:/ComfyUI/models/unet/anima/chosenIrisesMix_v20Anima.safetensors",
+                "unet",
+                "fallback.safetensors"
+            ),
+            "anima\\chosenIrisesMix_v20Anima.safetensors"
+        );
+        assert_eq!(
+            comfy_relative_model_name(
+                "D:/ComfyUI/models/anima/chosenIrisesMix_v20Anima.safetensors",
+                "unet",
+                "fallback.safetensors"
+            ),
+            "anima\\chosenIrisesMix_v20Anima.safetensors"
+        );
     }
 
     #[test]
