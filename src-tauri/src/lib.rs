@@ -1007,6 +1007,93 @@ mod tests {
         );
     }
 
+    fn workflow_test_checkpoint() -> ModelInfo {
+        ModelInfo {
+            id:"cp".into(), name:"miaomiaoRealskin_anima13.safetensors".into(),
+            kind:"checkpoint".into(),
+            path:"D:/ComfyUI/models/unet/anima/miaomiaoRealskin_anima13.safetensors".into(),
+            size:1, base_model:Some("anima".into()), tags:vec!["anima".into()],
+            activation_tags:vec![], character:false, thumbnail:None,
+            source:"test".into(), cache_name:None, cache_description:None,
+        }
+    }
+
+    fn workflow_test_lora(id: &str, name: &str, weight: f32) -> SelectedLora {
+        SelectedLora {
+            id:id.into(), name:name.into(),
+            path:format!("D:/ComfyUI/models/loras/Anima/{name}.safetensors"),
+            weight, activation_tags:vec![], tags:vec!["anima".into()],
+            description:None, character:false, base_model:Some("anima".into()),
+        }
+    }
+
+    #[test]
+    fn reference_workflow_uses_no_lora_chain_when_none_selected() {
+        let workflow = build_workflow(WorkflowRequest {
+            checkpoint:workflow_test_checkpoint(),
+            loras:vec![],
+            width:1920, height:1080, steps:12, cfg:1.0,
+            sampler:"euler".into(), seed:123,
+        }).expect("reference workflow must build");
+
+        assert_eq!(workflow["13"]["class_type"], "UNETLoader");
+        assert_eq!(workflow["13"]["inputs"]["unet_name"], "anima\\miaomiaoRealskin_anima13.safetensors");
+        assert_eq!(workflow["7"]["inputs"]["model"], json!(["13",0]));
+        assert!(workflow.get("14").is_none());
+        assert_eq!(workflow["10"]["inputs"]["vae"], json!(["9",0]));
+        assert_eq!(workflow["12"]["inputs"]["images"], json!(["10",0]));
+    }
+
+    #[test]
+    fn reference_workflow_adds_exactly_one_lora_node_per_selected_lora() {
+        let loras = vec![
+            workflow_test_lora("l1","Akane",1.0),
+            workflow_test_lora("l2","accelerator\\anima-turbo-lora-v0.2",0.8),
+            workflow_test_lora("l3","third",0.6),
+        ];
+        let workflow = build_workflow(WorkflowRequest {
+            checkpoint:workflow_test_checkpoint(),
+            loras:loras,
+            width:1920, height:1080, steps:12, cfg:1.0,
+            sampler:"euler".into(), seed:123,
+        }).expect("reference workflow must build");
+
+        for (id, previous, lora_name, weight) in [
+            ("14","13","Anima\\Akane.safetensors",1.0),
+            ("15","14","accelerator\\anima-turbo-lora-v0.2.safetensors",0.8),
+            ("16","15","Anima\\third.safetensors",0.6),
+        ] {
+            assert_eq!(workflow[id]["class_type"], "LoraLoaderModelOnly");
+            assert_eq!(workflow[id]["inputs"]["model"], json!([previous,0]));
+            assert_eq!(workflow[id]["inputs"]["lora_name"], lora_name);
+            assert_eq!(workflow[id]["inputs"]["strength_model"], json!(weight));
+        }
+        assert_eq!(workflow["7"]["inputs"]["model"], json!(["16",0]));
+        assert!(workflow.get("17").is_none());
+    }
+
+    #[test]
+    fn reference_workflow_has_no_numeric_node_references() {
+        let workflow = build_workflow(WorkflowRequest {
+            checkpoint:workflow_test_checkpoint(),
+            loras:vec![workflow_test_lora("l1","Akane",1.0)],
+            width:1920, height:1080, steps:12, cfg:1.0,
+            sampler:"euler".into(), seed:123,
+        }).expect("reference workflow must build");
+
+        for node in workflow.as_object().unwrap().values() {
+            if let Some(inputs) = node.get("inputs").and_then(Value::as_object) {
+                for input in inputs.values() {
+                    if let Some(link) = input.as_array() {
+                        if link.len() >= 2 {
+                            assert!(link[0].is_string(), "ComfyUI link must use string node id: {link:?}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn full_generation_pipeline_dry_run() {
         let checkpoint = ModelInfo {
