@@ -1287,11 +1287,17 @@ fn path_to_data_url(path:String)->Result<String,String>{
 async fn start_web_host(app:AppHandle,state:tauri::State<'_,AppState>,port:Option<u16>)->Result<Value,String>{
     let mut host=state.web_host.lock().await;
     if let Some(existing)=host.as_ref(){
-        return Ok(json!({"running":true,"port":existing.port,"localUrl":format!("http://127.0.0.1:{}",existing.port),"lanUrl":existing.lan_url}));
+        return Ok(json!({"running":true,"port":existing.port,"localUrl":existing.lan_url,"lanUrl":existing.lan_url}));
     }
 
-    let chosen_port=port.unwrap_or(1421);
-    let listener=tokio::net::TcpListener::bind(("0.0.0.0",chosen_port)).await.map_err(|e|format!("LAN host could not bind port {}: {}",chosen_port,e))?;
+    let chosen_port=port.unwrap_or(1424);
+    let lan_host=lan_ip();
+    if lan_host=="127.0.0.1"{
+        return Err("No LAN IPv4 address was detected. Connect the computer to the LAN and try again.".into());
+    }
+    let listener=tokio::net::TcpListener::bind((lan_host.as_str(),chosen_port))
+        .await
+        .map_err(|e|format!("LAN host could not bind {}:{}: {}",lan_host,chosen_port,e))?;
     let actual_port=listener.local_addr().map_err(|e|e.to_string())?.port();
     let dist=dist_directory(&app).ok_or("Could not find dist/index.html. Run npm run build first.")?;
     let api_state=WebApiState{app:app.clone()};
@@ -1299,11 +1305,11 @@ async fn start_web_host(app:AppHandle,state:tauri::State<'_,AppState>,port:Optio
         .route("/api/{command}",post(web_command))
         .fallback_service(ServeDir::new(dist))
         .with_state(api_state);
-    let lan=format!("http://{}:{}",lan_ip(),actual_port);
+    let lan=format!("http://{}:{}",lan_host,actual_port);
     let task=tokio::spawn(async move{
         let _=axum::serve(listener,router).await;
     });
-    let url=json!({"running":true,"port":actual_port,"localUrl":format!("http://127.0.0.1:{}",actual_port),"lanUrl":lan});
+    let url=json!({"running":true,"port":actual_port,"localUrl":lan,"lanUrl":lan});
     *host=Some(WebHostRuntime{port:actual_port,lan_url:lan,task});
     Ok(url)
 }
