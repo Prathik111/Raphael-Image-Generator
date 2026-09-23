@@ -64,6 +64,13 @@ function App() {
   const [toast, setToast] = useState('');
   const [thumbs, setThumbs] = useState<Record<string,string>>({});
   const [selectedLoraIds, setSelectedLoraIds] = useState<string[]>([]);
+  const [comfyProgress, setComfyProgress] = useState(0);
+  const [comfyCurrentStep, setComfyCurrentStep] = useState(0);
+  const [comfyTotalSteps, setComfyTotalSteps] = useState(0);
+  const [comfyCurrentNode, setComfyCurrentNode] = useState('');
+  const [comfyStatus, setComfyStatus] = useState('idle');
+  const [resultImage, setResultImage] = useState('');
+  const [resultFilename, setResultFilename] = useState('');
   const streamText = useRef('');
 
   const selected = useMemo(
@@ -193,6 +200,13 @@ function App() {
     setBusy(true);
     setError('');
     setToast('');
+    setComfyProgress(0);
+    setComfyCurrentStep(0);
+    setComfyTotalSteps(0);
+    setComfyCurrentNode('');
+    setComfyStatus('idle');
+    setResultImage('');
+    setResultFilename('');
     try {
       setStage('compatibility');
       setStageStatus('compatibility','running');
@@ -286,16 +300,48 @@ function App() {
 
       setStage('comfy');
       setStageStatus('comfy','running');
+      setComfyStatus('submitting');
       let promptId: string | undefined;
       try {
         const response = await invoke<{prompt_id?:string}>('submit_to_comfy', {
           req:{comfyUrl, workflow:injected},
         });
         promptId = response.prompt_id;
+        if (!promptId) throw new Error('ComfyUI did not return a prompt_id.');
+
+        const progressChannel = new Channel<{
+          percent:number;
+          current:number;
+          total:number;
+          node:string | null;
+          status:string;
+        }>();
+        progressChannel.onmessage = event => {
+          setComfyProgress(event.percent);
+          setComfyCurrentStep(event.current);
+          setComfyTotalSteps(event.total);
+          setComfyCurrentNode(event.node || '');
+          setComfyStatus(event.status);
+        };
+
+        setComfyStatus('waiting');
+        const generation = await invoke<{
+          imageDataUrl:string | null;
+          filename:string | null;
+        }>('monitor_comfy_generation', {
+          req:{comfyUrl, promptId},
+          onEvent:progressChannel,
+        });
+
+        if (generation.imageDataUrl) setResultImage(generation.imageDataUrl);
+        if (generation.filename) setResultFilename(generation.filename);
+        setComfyProgress(100);
+        setComfyStatus('done');
         setStageStatus('comfy','done');
       } catch (e) {
+        setComfyStatus('error');
         setStageStatus('comfy','error');
-        setError('ComfyUI submission failed: ' + String(e));
+        setError('ComfyUI generation failed: ' + String(e));
       }
 
       const record: GenerationRecord = {
@@ -430,6 +476,39 @@ function App() {
             </div>}
             <div className="run-row"><button className="secondary-btn" disabled={busy || !selected} onClick={() => void rollStack()}><WandSparkles size={14}/> ROLL STACK</button><button className="primary-btn" disabled={busy || !selected || !llm.model} onClick={() => void generate()}><Play size={15}/> {busy ? 'GENERATING…' : 'GENERATE'}</button></div>
           </div>
+        </section>
+
+        <section className="panel generation-result-panel">
+          <div className="panel-head">
+            <div>
+              <div className="kicker">COMFYUI GENERATION MONITOR</div>
+              <div className="panel-title">IMAGE OUTPUT</div>
+            </div>
+            <span className="provider-chip">{comfyStatus === 'done' ? 'COMPLETE' : comfyStatus === 'error' ? 'ERROR' : comfyStatus === 'idle' ? 'IDLE' : comfyStatus.toUpperCase()}</span>
+          </div>
+
+          <div className="comfy-progress-wrap">
+            <div className="comfy-progress-meta">
+              <span>{comfyCurrentStep && comfyTotalSteps ? 'STEP ' + comfyCurrentStep + ' / ' + comfyTotalSteps : comfyStatus === 'done' ? 'COMPLETE' : 'WAITING FOR COMFYUI'}</span>
+              <strong>{Math.round(comfyProgress)}%</strong>
+            </div>
+            <div className="comfy-progress-track">
+              <div className="comfy-progress-fill" style={{width: comfyProgress + '%'}} />
+            </div>
+            {comfyCurrentNode && <div className="comfy-node">NODE {comfyCurrentNode}</div>}
+          </div>
+
+          {resultImage ? (
+            <div className="result-image-wrap">
+              <img className="result-image" src={resultImage} alt={resultFilename || 'Generated result'} />
+              {resultFilename && <div className="result-filename">{resultFilename}</div>}
+            </div>
+          ) : (
+            <div className="result-placeholder">
+              <WandSparkles size={22}/>
+              <span>{comfyStatus === 'error' ? 'Generation failed. See the error message below.' : 'Your generated image will appear here when ComfyUI finishes.'}</span>
+            </div>
+          )}
         </section>
       </>}
 
