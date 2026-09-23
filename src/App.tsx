@@ -976,7 +976,7 @@ function App(){
                 }catch(e){setError(String(e));}
               })()}><RefreshCw size={13}/> GET MODELS</button>
               <label className="wide-field"><span>TEMPERATURE · {generationDraft.llm.temperature.toFixed(2)}</span><input type="range" min={0} max={2} step={0.05} value={generationDraft.llm.temperature} onChange={e=>setGenerationDraft(d=>({...d,llm:{...d.llm,temperature:Number(e.target.value)}}))}/></label>
-              <label className="wide-field"><span>MAX TOKENS</span><input type="number" min={128} max={16384} value={generationDraft.llm.maxTokens} onChange={e=>setGenerationDraft(d=>({...d,llm:{...d.llm,maxTokens:Math.max(128,Number(e.target.value))}}))}/>
+              <label className="wide-field"><span>MAX TOKENS</span><input type="number" min={128} max={16384} value={generationDraft.llm.maxTokens} onChange={e=>setGenerationDraft(d=>({...d,llm:{...d.llm,maxTokens:Math.max(128,Number(e.target.value))}}))}/></label>
               <label className="wide-field"><span>CONTEXT TOKENS</span><input type="number" min={2048} max={131072} step={1024} value={generationDraft.llm.contextTokens} onChange={e=>setGenerationDraft(d=>({...d,llm:{...d.llm,contextTokens:Math.max(2048,Number(e.target.value))}}))}/></label>
             </div>
           </section>
