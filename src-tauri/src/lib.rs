@@ -207,9 +207,8 @@ fn manager_db_candidates(extra_root: Option<&str>) -> Vec<PathBuf> {
 
 fn manager_model_type(raw: &str) -> Option<&'static str> {
     match raw {
-        "Checkpoint" => Some("checkpoint"),
-        "LoRA" => Some("lora"),
-        "checkpoint" | "lora" => Some(raw),
+        "Checkpoint" | "checkpoint" => Some("checkpoint"),
+        "LoRA" | "lora" => Some("lora"),
         _ => None,
     }
 }
@@ -262,6 +261,7 @@ fn load_manager_models(db_path: &Path, comfy_root: &Path) -> Result<(Vec<ModelIn
             .filter(|p| p.is_file())
             .map(|p| p.to_string_lossy().to_string());
 
+        let character = is_character(&tags);
         let model = ModelInfo {
             id: format!("raphael-{}", id),
             name: civitai_name.or(version_name).unwrap_or(filename),
@@ -271,7 +271,7 @@ fn load_manager_models(db_path: &Path, comfy_root: &Path) -> Result<(Vec<ModelIn
             base_model,
             tags,
             activation_tags,
-            character: is_character(&tags),
+            character,
             thumbnail,
             source: "raphael-model-manager".into(),
             cache_name: None,
@@ -361,20 +361,38 @@ fn pick_folder()->Result<PickResult,String>{
     Ok(PickResult{path:rfd::FileDialog::new().pick_folder().map(|x|x.to_string_lossy().to_string())})
 }
 
+#[derive(Debug, Serialize)]
+struct RaphaelConfig {
+    models_root: Option<String>,
+    db_path: Option<String>,
+}
+
 #[tauri::command]
-fn discover_raphael_roots()->Vec<String>{
-    let mut roots=Vec::new();
-    for key in ["APPDATA","LOCALAPPDATA","USERPROFILE"]{
-        if let Ok(base)=std::env::var(key){
-            for rel in ["Raphael Model Manager","Raphael-Model-Manager","Raphael Model Registry","Raphael-Model-Registry"]{
-                let p=PathBuf::from(&base).join(rel); if p.exists(){roots.push(p.to_string_lossy().to_string());}
+fn discover_raphael_config() -> RaphaelConfig {
+    for db in manager_db_candidates(None) {
+        if !db.is_file() { continue; }
+        if let Ok(conn) = Connection::open_with_flags(&db, OpenFlags::SQLITE_OPEN_READ_ONLY) {
+            if let Ok(models_root) = conn.query_row(
+                "SELECT value FROM settings WHERE key='models_root'",
+                [],
+                |row| row.get::<_, String>(0)
+            ).optional() {
+                return RaphaelConfig {
+                    models_root,
+                    db_path: Some(db.to_string_lossy().to_string()),
+                };
             }
         }
     }
-    for p in [r"D:\Raphael-Model-Manager",r"D:\Raphael-Model-Registry",r"C:\Raphael-Model-Manager",r"C:\Raphael-Model-Registry"]{
-        if Path::new(p).exists(){roots.push(p.to_string());}
-    }
-    roots.sort(); roots.dedup(); roots
+    RaphaelConfig { models_root: None, db_path: None }
+}
+
+#[tauri::command]
+fn discover_raphael_roots() -> Vec<String> {
+    manager_db_candidates(None)
+        .into_iter()
+        .filter_map(|p| p.parent().map(|x| x.to_string_lossy().to_string()))
+        .collect()
 }
 
 #[tauri::command]
@@ -574,7 +592,7 @@ pub fn run(){
     tauri::Builder::default()
         .manage(AppState{active_stream:Arc::new(Mutex::new(false))})
         .invoke_handler(tauri::generate_handler![
-            pick_folder,discover_raphael_roots,scan_library,list_provider_models,
+            pick_folder,discover_raphael_config,discover_raphael_roots,scan_library,list_provider_models,
             prepare_generation,stream_llm,parse_prompt_pair,build_workflow,inject_prompts,
             submit_to_comfy,load_history,append_history,path_to_data_url
         ])
