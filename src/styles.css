@@ -145,21 +145,33 @@ button,input,textarea,select{font-size:12px}
 .result-placeholder{min-height:280px;font-size:11px}
 .error-box,.toast{font-size:11px}
 
-/* Left settings drawer */
+/* Settings modal */
+.settings-overlay{
+  position:fixed;
+  inset:0;
+  z-index:1000;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  padding:28px;
+  background:rgba(0,0,0,.70);
+  backdrop-filter:blur(6px);
+  animation:settings-fade-in .16s ease-out;
+}
 .settings-drawer{
-  position:absolute;
-  z-index:30;
-  left:0;
-  top:0;
-  bottom:0;
-  width:430px;
-  border:1px solid rgba(255,255,255,.22);
-  background:rgba(2,8,7,.97);
-  box-shadow:0 24px 80px rgba(0,0,0,.65);
-  backdrop-filter:blur(14px);
+  position:relative;
+  z-index:1;
+  width:min(760px,94vw);
+  height:min(860px,92vh);
+  max-height:calc(100vh - 56px);
+  border:1px solid rgba(255,255,255,.28);
+  background:rgba(2,8,7,.98);
+  box-shadow:0 32px 100px rgba(0,0,0,.78),0 0 0 1px rgba(255,255,255,.04);
+  backdrop-filter:blur(18px);
   display:flex;
   flex-direction:column;
   overflow:hidden;
+  animation:settings-panel-in .18s ease-out;
 }
 .drawer-head{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:16px 16px 12px;border-bottom:1px solid var(--line2)}
 .drawer-title{font-size:22px;letter-spacing:.08em;margin-top:3px}
@@ -266,3 +278,23 @@ button,input,textarea,select{font-size:12px}
 @media (max-width:920px){
   .right-rail{display:none}.content{left:245px;right:14px}
 }
+
+@keyframes settings-fade-in{from{opacity:0}to{opacity:1}}
+@keyframes settings-panel-in{from{opacity:0;transform:translateY(8px) scale(.985)}to{opacity:1;transform:translateY(0) scale(1)}}
+.settings-drawer .drawer-head{
+  flex:none;
+  min-height:68px;
+  background:linear-gradient(to bottom,rgba(255,255,255,.035),transparent);
+}
+.settings-drawer .drawer-title{font-size:24px}
+.settings-drawer .drawer-scroll{
+  flex:1;
+  min-height:0;
+  overscroll-behavior:contain;
+}
+.settings-drawer .drawer-foot{
+  flex:none;
+  min-height:64px;
+  background:rgba(0,0,0,.52);
+}
+.settings-drawer .drawer-foot button{min-height:38px}
