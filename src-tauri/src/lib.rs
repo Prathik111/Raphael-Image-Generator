@@ -71,7 +71,6 @@ struct PrepareRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct PromptPair { positive_prompt: String, negative_prompt: String, rationale: Option<String> }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
