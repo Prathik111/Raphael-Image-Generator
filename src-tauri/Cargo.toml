@@ -25,6 +25,9 @@ rfd = "0.15"
 base64 = "0.22"
 url = "2"
 anyhow = "1"
+axum = "0.8"
+tower-http = { version = "0.6", features = ["fs"] }
+tokio-stream = "0.1"
 tokio-tungstenite = { version = "0.30", features = ["connect"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 
