@@ -1032,7 +1032,7 @@ async fn monitor_comfy_generation(
     let base=base_url(&req.comfy_url);
     let ws_url=format!("{}/ws?clientId=raphael-prompt-forge",base.replace("https://","wss://").replace("http://","ws://"));
     let client=reqwest::Client::new();
-    let mut socket=connect_async(ws_url).await.ok().map(|(_,stream)| stream);
+    let mut socket=connect_async(ws_url).await.ok().map(|(stream, _response)| stream);
     let started=Instant::now();
     let mut last_percent=0.0f32;
     let mut last_current=0u32;
