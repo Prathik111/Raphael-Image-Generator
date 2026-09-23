@@ -30,6 +30,7 @@ export interface LlmSettings {
   model: string;
   temperature: number;
   maxTokens: number;
+  contextTokens: number;
 }
 
 export interface Constraints {
