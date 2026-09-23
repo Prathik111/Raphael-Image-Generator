@@ -4,11 +4,13 @@ use futures_util::StreamExt;
 use rand::{prelude::IndexedRandom, seq::SliceRandom, Rng};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{fs, path::{Path, PathBuf}, sync::Arc, time::{SystemTime, UNIX_EPOCH}};
+use std::{fs, path::{Path, PathBuf}, sync::Arc, time::{Duration, Instant, SystemTime, UNIX_EPOCH}};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use tauri::{AppHandle, Manager};
 use tauri::ipc::Channel;
 use tokio::sync::Mutex;
+use tokio::time::{sleep, timeout};
+use tokio_tungstenite::{connect_async, tungstenite::Message};
 use walkdir::WalkDir;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -113,6 +115,27 @@ struct FinalizePromptRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SubmitRequest { comfy_url: String, workflow: Value }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MonitorComfyRequest { comfy_url: String, prompt_id: String }
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ComfyProgress {
+    percent: f32,
+    current: u32,
+    total: u32,
+    node: Option<String>,
+    status: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ComfyGenerationResult {
+    image_data_url: Option<String>,
+    filename: Option<String>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct HistoryRecord { id: String, timestamp: String, payload: Value }
@@ -959,6 +982,130 @@ async fn submit_to_comfy(req:SubmitRequest)->Result<Value,String>{
     serde_json::from_str(&text).map_err(|e|format!("Invalid ComfyUI response: {}",e))
 }
 
+async fn fetch_comfy_history(client:&reqwest::Client, base:&str, prompt_id:&str)->Result<Option<Value>,String>{
+    let response=client.get(format!("{}/history/{}",base,prompt_id)).send().await.map_err(|e|e.to_string())?;
+    if !response.status().is_success(){return Ok(None);}
+    let value=response.json::<Value>().await.map_err(|e|e.to_string())?;
+    Ok(value.get(prompt_id).cloned())
+}
+
+fn first_comfy_image(history:&Value)->Option<(String,String,String)>{
+    let outputs=history.get("outputs")?.as_object()?;
+    for node in outputs.values(){
+        let images=node.get("images")?.as_array()?;
+        if let Some(image)=images.first(){
+            let filename=image.get("filename")?.as_str()?.to_string();
+            let subfolder=image.get("subfolder").and_then(|x|x.as_str()).unwrap_or("").to_string();
+            let image_type=image.get("type").and_then(|x|x.as_str()).unwrap_or("output").to_string();
+            return Some((filename,subfolder,image_type));
+        }
+    }
+    None
+}
+
+async fn fetch_comfy_image(client:&reqwest::Client, base:&str, image:(String,String,String))->Result<String,String>{
+    let (filename,subfolder,image_type)=image;
+    let response=client.get(format!("{}/view",base))
+        .query(&[
+            ("filename",filename.as_str()),
+            ("subfolder",subfolder.as_str()),
+            ("type",image_type.as_str()),
+        ])
+        .send().await.map_err(|e|e.to_string())?;
+    if !response.status().is_success(){
+        return Err(format!("ComfyUI image fetch returned HTTP {}",response.status()));
+    }
+    let mime=response.headers().get(reqwest::header::CONTENT_TYPE)
+        .and_then(|x|x.to_str().ok())
+        .unwrap_or("image/png")
+        .split(';').next().unwrap_or("image/png")
+        .to_string();
+    let bytes=response.bytes().await.map_err(|e|e.to_string())?;
+    Ok(format!("data:{};base64,{}",mime,base64::engine::general_purpose::STANDARD.encode(bytes)))
+}
+
+#[tauri::command]
+async fn monitor_comfy_generation(
+    req:MonitorComfyRequest,
+    on_event:Channel<ComfyProgress>,
+)->Result<ComfyGenerationResult,String>{
+    let base=base_url(&req.comfy_url);
+    let ws_url=format!("{}/ws?clientId=raphael-prompt-forge",base.replace("https://","wss://").replace("http://","ws://"));
+    let client=reqwest::Client::new();
+    let mut socket=connect_async(ws_url).await.ok().map(|(_,stream)| stream);
+    let started=Instant::now();
+
+    let _=on_event.send(ComfyProgress{
+        percent:0.0,current:0,total:1,node:None,status:"waiting".into()
+    });
+
+    loop{
+        if let Some(history)=fetch_comfy_history(&client,&base,&req.prompt_id).await?{
+            if let Some(image_ref)=first_comfy_image(&history){
+                let image_data_url=fetch_comfy_image(&client,&base,image_ref.clone()).await?;
+                let _=on_event.send(ComfyProgress{
+                    percent:100.0,current:1,total:1,node:None,status:"done".into()
+                });
+                return Ok(ComfyGenerationResult{
+                    image_data_url:Some(image_data_url),
+                    filename:Some(image_ref.0),
+                });
+            }
+        }
+
+        if started.elapsed()>Duration::from_secs(30*60){
+            return Err("ComfyUI generation timed out after 30 minutes.".into());
+        }
+
+        if let Some(ws)=socket.as_mut(){
+            match timeout(Duration::from_millis(250),ws.next()).await{
+                Ok(Some(Ok(Message::Text(text))))=>{
+                    if let Ok(value)=serde_json::from_str::<Value>(text.as_ref()){
+                        let kind=value.get("type").and_then(|x|x.as_str()).unwrap_or("");
+                        let data=value.get("data").cloned().unwrap_or(Value::Null);
+                        let message_prompt_id=data.get("prompt_id").and_then(|x|x.as_str()).unwrap_or("");
+                        if message_prompt_id==req.prompt_id{
+                            match kind{
+                                "progress"=>{
+                                    let current=data.get("value").and_then(|x|x.as_u64()).unwrap_or(0) as u32;
+                                    let total=data.get("max").and_then(|x|x.as_u64()).unwrap_or(1) as u32;
+                                    let percent=if total>0 {current as f32*100.0/total as f32}else{0.0};
+                                    let _=on_event.send(ComfyProgress{
+                                        percent:percent.clamp(0.0,100.0),
+                                        current,total,
+                                        node:data.get("node").and_then(|x|x.as_str()).map(str::to_string),
+                                        status:"sampling".into(),
+                                    });
+                                }
+                                "executing"=>{
+                                    let node=data.get("node").and_then(|x|x.as_str()).map(str::to_string);
+                                    let _=on_event.send(ComfyProgress{
+                                        percent:0.0,current:0,total:0,node,status:if node.is_some(){"running".into()}else{"finishing".into()},
+                                    });
+                                }
+                                "execution_error"=>{
+                                    return Err(data.get("exception_message").and_then(|x|x.as_str()).unwrap_or("ComfyUI execution failed.").to_string());
+                                }
+                                _=>{}
+                            }
+                        }
+                    }
+                }
+                Ok(Some(Ok(Message::Close(_))))|Ok(None)=>{
+                    socket=None;
+                }
+                Ok(Some(Err(_)))=>{
+                    socket=None;
+                }
+                Err(_)=>{}
+                Ok(Some(Ok(_)))=>{}
+            }
+        }else{
+            sleep(Duration::from_millis(500)).await;
+        }
+    }
+}
+
 fn now_id()->String{SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis().to_string()}
 fn history_path(app:&AppHandle)->Result<PathBuf,String>{let dir=app.path().app_data_dir().map_err(|e|e.to_string())?;fs::create_dir_all(&dir).map_err(|e|e.to_string())?;Ok(dir.join("generation-history.json"))}
 
@@ -986,7 +1133,7 @@ pub fn run(){
         .invoke_handler(tauri::generate_handler![
             pick_folder,discover_raphael_config,discover_raphael_roots,scan_library,list_provider_models,
             prepare_generation,stream_llm,parse_prompt_pair,finalize_prompt_pair,build_workflow,inject_prompts,
-            submit_to_comfy,load_history,append_history,path_to_data_url
+            submit_to_comfy,monitor_comfy_generation,load_history,append_history,path_to_data_url
         ])
         .run(tauri::generate_context!())
         .expect("error while running Raphael Prompt Forge");
