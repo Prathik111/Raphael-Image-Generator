@@ -631,21 +631,20 @@ fn fallback_prompt_pair(raw:&str)->Option<PromptPair>{
     let lower=text.to_lowercase();
     let positive_markers=["positive_prompt:", "positive prompt:", "positive:"];
     let negative_markers=["negative_prompt:", "negative prompt:", "negative:"];
-    let p_start=positive_markers.iter().find_map(|m|lower.find(m).map(|i|i+m.len()));
-    let n_start=negative_markers.iter().find_map(|m|lower.find(m).map(|i|i+m.len()));
+    let p_marker=positive_markers.iter().find_map(|m|lower.find(m).map(|i|(i,i+m.len())));
+    let n_marker=negative_markers.iter().find_map(|m|lower.find(m).map(|i|(i,i+m.len())));
 
-    if let (Some(ps),Some(ns))=(p_start,n_start){
-        let (positive,negative)=if ps<ns{
-            (text[ps..ns-ns.min(ps)].trim(), text[ns..].trim())
-        }else{
-            (text[ps..].trim(), text[ns..ps-ns.min(ps)].trim())
-        };
-        if !positive.is_empty() && !negative.is_empty(){
-            return Some(PromptPair{
-                positive_prompt:positive.trim_matches(|c|c=='"'||c=='\'').trim().to_string(),
-                negative_prompt:negative.trim_matches(|c|c=='"'||c=='\'').trim().to_string(),
-                rationale:Some("Recovered from a non-JSON LLM response.".into()),
-            });
+    if let (Some((p_pos,p_value)),Some((n_pos,n_value)))=(p_marker,n_marker){
+        if p_pos<n_pos{
+            let positive=text[p_value..n_pos].trim();
+            let negative=text[n_value..].trim();
+            if !positive.is_empty() && !negative.is_empty(){
+                return Some(PromptPair{
+                    positive_prompt:positive.trim_matches(|c|c=='"'||c=='\'').trim().to_string(),
+                    negative_prompt:negative.trim_matches(|c|c=='"'||c=='\'').trim().to_string(),
+                    rationale:Some("Recovered from a non-JSON LLM response.".into()),
+                });
+            }
         }
     }
 
