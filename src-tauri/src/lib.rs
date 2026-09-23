@@ -88,9 +88,9 @@ struct WorkflowRequest {
 #[serde(rename_all = "camelCase")]
 struct InjectRequest {
     workflow: Value,
-    #[serde(rename = "positivePrompt")]
+    #[serde(rename = "positivePrompt", alias = "positive_prompt")]
     positive_prompt: String,
-    #[serde(rename = "negativePrompt")]
+    #[serde(rename = "negativePrompt", alias = "negative_prompt")]
     negative_prompt: String,
 }
 
@@ -806,4 +806,77 @@ pub fn run(){
         ])
         .run(tauri::generate_context!())
         .expect("error while running Raphael Prompt Forge");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inject_request_accepts_frontend_camel_case_payload() {
+        let req: InjectRequest = serde_json::from_value(json!({
+            "workflow": {
+                "1": {"class_type":"CLIPTextEncode","inputs":{"text":"__POSITIVE_PROMPT__","clip":["0",0]}},
+                "2": {"class_type":"CLIPTextEncode","inputs":{"text":"__NEGATIVE_PROMPT__","clip":["0",0]}}
+            },
+            "positivePrompt": "a detailed portrait",
+            "negativePrompt": "blurry, low quality"
+        })).expect("camelCase invoke payload must deserialize");
+
+        let injected = inject_prompts(req).expect("inject_prompts must succeed");
+        assert_eq!(
+            injected["1"]["inputs"]["text"].as_str(),
+            Some("a detailed portrait")
+        );
+        assert_eq!(
+            injected["2"]["inputs"]["text"].as_str(),
+            Some("blurry, low quality")
+        );
+    }
+
+    #[test]
+    fn inject_request_accepts_legacy_snake_case_payload() {
+        let req: InjectRequest = serde_json::from_value(json!({
+            "workflow": {"1":{"class_type":"CLIPTextEncode","inputs":{"text":"__POSITIVE_PROMPT__"}}},
+            "positive_prompt": "portrait",
+            "negative_prompt": "bad anatomy"
+        })).expect("snake_case compatibility payload must deserialize");
+
+        let injected = inject_prompts(req).expect("inject_prompts must succeed");
+        assert_eq!(
+            injected["1"]["inputs"]["text"].as_str(),
+            Some("portrait")
+        );
+    }
+
+    #[test]
+    fn activation_prompts_are_deterministically_appended() {
+        let pair = PromptPair {
+            positive_prompt: "portrait, blue eyes, serene expression, triggerA".into(),
+            negative_prompt: "blurry".into(),
+            rationale: None,
+        };
+        let loras = vec![
+            SelectedLora {
+                id: "1".into(), name:"character".into(), path:"c.safetensors".into(),
+                weight:0.8, activation_tags:vec!["triggerA".into(), "char_tag".into()],
+                tags:vec!["character".into()], description:None, character:true,
+                base_model:Some("anima".into())
+            },
+            SelectedLora {
+                id: "2".into(), name:"style".into(), path:"s.safetensors".into(),
+                weight:0.7, activation_tags:vec!["style_tag".into()],
+                tags:vec!["style".into()], description:None, character:false,
+                base_model:Some("anima".into())
+            }
+        ];
+        let finalized = finalize_prompt_pair(FinalizePromptRequest {
+            prompt_pair: pair,
+            loras,
+        }).expect("finalize_prompt_pair must succeed");
+
+        assert!(!finalized.positive_prompt.contains("triggerA"));
+        assert!(finalized.positive_prompt.ends_with("triggerA, char_tag, style_tag"));
+        assert_eq!(finalized.negative_prompt, "blurry");
+    }
 }
