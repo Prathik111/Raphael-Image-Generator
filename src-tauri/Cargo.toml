@@ -25,6 +25,7 @@ rfd = "0.15"
 base64 = "0.22"
 url = "2"
 anyhow = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem"] }
