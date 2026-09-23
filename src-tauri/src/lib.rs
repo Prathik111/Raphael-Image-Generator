@@ -90,14 +90,18 @@ struct WorkflowRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct InjectRequest {
     workflow: Value,
-    #[serde(rename = "positivePrompt", alias = "positive_prompt")]
-    positive_prompt: String,
-    #[serde(rename = "negativePrompt", alias = "negative_prompt")]
-    negative_prompt: String,
+    #[serde(default)]
+    positivePrompt: Option<String>,
+    #[serde(default)]
+    positive_prompt: Option<String>,
+    #[serde(default)]
+    negativePrompt: Option<String>,
+    #[serde(default)]
+    negative_prompt: Option<String>,
 }
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -812,8 +816,26 @@ fn build_workflow(req:WorkflowRequest)->Result<Value,String>{
 
 #[tauri::command]
 fn inject_prompts(req:InjectRequest)->Result<Value,String>{
+    let positive=req.positivePrompt.or(req.positive_prompt)
+        .ok_or_else(||"inject_prompts requires positivePrompt".to_string())?;
+    let negative=req.negativePrompt.or(req.negative_prompt)
+        .ok_or_else(||"inject_prompts requires negativePrompt".to_string())?;
+
     let mut w=req.workflow;
-    if let Some(map)=w.as_object_mut(){for node in map.values_mut(){if node.get("class_type").and_then(|x|x.as_str())==Some("CLIPTextEncode"){if let Some(inputs)=node.get_mut("inputs").and_then(|x|x.as_object_mut()){if inputs.get("text").and_then(|x|x.as_str())==Some("__POSITIVE_PROMPT__"){inputs.insert("text".into(),Value::String(req.positive_prompt.clone()));}if inputs.get("text").and_then(|x|x.as_str())==Some("__NEGATIVE_PROMPT__"){inputs.insert("text".into(),Value::String(req.negative_prompt.clone()));}}}}}
+    if let Some(map)=w.as_object_mut(){
+        for node in map.values_mut(){
+            if node.get("class_type").and_then(|x|x.as_str())==Some("CLIPTextEncode"){
+                if let Some(inputs)=node.get_mut("inputs").and_then(|x|x.as_object_mut()){
+                    if inputs.get("text").and_then(|x|x.as_str())==Some("__POSITIVE_PROMPT__"){
+                        inputs.insert("text".into(),Value::String(positive.clone()));
+                    }
+                    if inputs.get("text").and_then(|x|x.as_str())==Some("__NEGATIVE_PROMPT__"){
+                        inputs.insert("text".into(),Value::String(negative.clone()));
+                    }
+                }
+            }
+        }
+    }
     Ok(w)
 }
 
