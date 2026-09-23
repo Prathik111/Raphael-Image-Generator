@@ -6,7 +6,7 @@ import {
   RefreshCw, Search, Settings2, Sparkles, Terminal, WandSparkles, X
 } from 'lucide-react';
 import type {
-  Constraints, DemographicLevel, DemographicPrompts, GenerationRecord, LibrarySnapshot,
+  Constraints, DemographicLevel, DemographicPrompts, GenerationRecord, GenerationSettings, LibrarySnapshot,
   LlmSettings, PreparedGeneration, PromptPair, ProviderKind, WebHostInfo
 } from './types';
 
@@ -211,8 +211,7 @@ function App(){
   const [thumbs,setThumbs]=useState<Record<string,string>>({});
   const [selectedLoraIds,setSelectedLoraIds]=useState<string[]>([]);
 
-  const [generationSettingsOpen,setGenerationSettingsOpen]=useState(false);
-  const [modelSettingsOpen,setModelSettingsOpen]=useState(false);
+  const [settingsOpen,setSettingsOpen]=useState(false);
   const [generationDraft,setGenerationDraft]=useState({
     llm,
     systemPrompt,
@@ -228,6 +227,8 @@ function App(){
     cfg,
     sampler,
   });
+  const [selectedHistoryId,setSelectedHistoryId]=useState('');
+  const [historySettingsVisible,setHistorySettingsVisible]=useState(false);
   const [checkpointSearch,setCheckpointSearch]=useState('');
   const [loraSearch,setLoraSearch]=useState('');
 
@@ -366,7 +367,7 @@ function App(){
       cfg,
       sampler,
     });
-    setGenerationSettingsOpen(true);
+    setSettingsOpen(true);
   }
 
   function saveGenerationSettings(){
@@ -389,16 +390,27 @@ function App(){
     setSteps(Math.max(1,draft.steps));
     setCfg(Math.max(0,draft.cfg));
     setSampler(draft.sampler || 'euler');
-    setGenerationSettingsOpen(false);
+    setSettingsOpen(false);
     setToast('Generation settings saved');
   }
 
   async function rollStack(){
     if(!selected || !library){
-      setError('Open Model Settings and select a checkpoint first.');
+      setError('Select a checkpoint first.');
       return null;
     }
     setError('');
+    const manualIds=selectedLoraIds.filter(id=>compatibleLoras.some(lora=>lora.id===id));
+    const minCount=Math.max(1,Math.min(maxLoras,constraints.randomLoraMin));
+    const maxCount=Math.max(minCount,Math.min(maxLoras,constraints.randomLoraMax));
+    const targetCount=Math.floor(Math.random()*(maxCount-minCount+1))+minCount;
+    const pool=compatibleLoras
+      .filter(lora=>!manualIds.includes(lora.id))
+      .sort(()=>Math.random()-0.5);
+    const additions=Math.max(0,targetCount-manualIds.length);
+    const combinedIds=[...manualIds,...pool.slice(0,additions).map(lora=>lora.id)];
+
+    setSelectedLoraIds(combinedIds);
     setStage('compatibility');
     setStageStatus('compatibility','running');
     try{
@@ -406,13 +418,12 @@ function App(){
         req:{
           checkpoint:selected,
           loras:library.loras,
-          selectedLoraIds:[],
+          selectedLoraIds:combinedIds,
           ...constraints,
           randomLoraMax:Math.min(maxLoras,constraints.randomLoraMax),
         },
       });
       setPrepared(result);
-      setSelectedLoraIds(result.loras.map(lora=>lora.id));
       setStageStatus('compatibility','done');
       setStage('selection');
       setStageStatus('selection','done');
@@ -570,6 +581,21 @@ function App(){
         setError('ComfyUI generation failed: ' + String(e));
       }
 
+      const historySettings:GenerationSettings={
+        llm:{...llm,apiKey:llm.apiKey ? '••••••••' : ''},
+        systemPrompt,
+        demographic,
+        demographicPrompts:{...demographicPrompts},
+        maxLoras,
+        randomLoraMin:constraints.randomLoraMin,
+        randomLoraMax:constraints.randomLoraMax,
+        constraints:{...constraints},
+        width,
+        height,
+        steps,
+        cfg,
+        sampler,
+      };
       const record:GenerationRecord={
         id:crypto.randomUUID(),
         timestamp:new Date().toISOString(),
@@ -580,11 +606,16 @@ function App(){
         scene:prep.scene,
         positivePrompt:pair.positive_prompt,
         negativePrompt:pair.negative_prompt,
+        rationale:pair.rationale,
+        generationSettings:historySettings,
+        imageDataUrl:resultImage || undefined,
+        imageFilename:resultFilename || undefined,
         workflow:injected,
         comfyPromptId:promptId,
       };
       await apiInvoke('append_history',{payload:record});
       setHistory(x=>[record,...x].slice(0,100));
+      setSelectedHistoryId(record.id);
       setStage('recorded');
       setStageStatus('recorded','done');
       setToast(promptId ? 'Generation complete · ' + promptId : 'Generation recorded');
@@ -603,6 +634,19 @@ function App(){
     }
     const picked=await apiInvoke<{path?:string|null}>('pick_folder');
     if(picked.path) setter(picked.path);
+  }
+
+  function openHistory(id:string){
+    setSelectedHistoryId(id);
+    setHistorySettingsVisible(false);
+    setTab('history');
+    setSettingsOpen(false);
+  }
+
+  function selectCheckpoint(id:string){
+    setSelectedId(id);
+    setPrepared(null);
+    setPrompts(null);
   }
 
   async function copy(text:string){
@@ -639,6 +683,8 @@ function App(){
     }
   }
 
+  const selectedHistory=history.find(item=>item.id===selectedHistoryId) || history[0];
+
   return <div className="app-shell">
     <iframe className="raphael-bg" src="/raphael-background.html" title="Raphael background" aria-hidden="true"/>
     <div className="vignette"/>
@@ -646,177 +692,56 @@ function App(){
     <header className="topbar">
       <div className="brand">
         <div className="brand-mark"><Sparkles size={15}/></div>
-        <div>
-          <div className="brand-title">PROMPT FORGE</div>
-          <div className="brand-sub">RAPHAEL GENERATION ENGINE</div>
-        </div>
+        <div className="brand-title">PROMPT FORGE</div>
       </div>
 
       <div className="top-actions">
-        <button onClick={openGenerationSettings}><Settings2 size={13}/> GENERATION SETTINGS</button>
-        <button onClick={()=>setModelSettingsOpen(true)}><Layers3 size={13}/> MODEL SETTINGS</button>
         {isTauriRuntime && (
           <button className={webHost ? 'host-active' : ''} onClick={()=>void (webHost ? stopLanHost() : startLanHost())}>
-            <Globe2 size={13}/> {webHost ? 'LAN ONLINE' : 'LAN WEB HOST'}
+            <Globe2 size={13}/> {webHost ? 'WEB HOST ON' : 'WEB HOST'}
           </button>
         )}
-        <span className="top-status"><span className="pulse-dot"/>{busy ? 'GENERATING' : 'READY'}</span>
+        {(busy || comfyStatus==='done' || comfyStatus==='error') && (
+          <span className={'top-status ' + (comfyStatus==='error' ? 'error' : '')}>
+            <span className="pulse-dot"/>
+            {busy ? 'GENERATING' : comfyStatus==='done' ? 'COMPLETE' : 'ERROR'}
+          </span>
+        )}
       </div>
     </header>
 
     <aside className="left-rail">
       <div className="rail-label">WORKSPACE</div>
-      <button className={'rail-btn ' + (tab==='generate' ? 'active' : '')} onClick={()=>setTab('generate')}><WandSparkles size={15}/> GENERATE</button>
-      <button className={'rail-btn ' + (tab==='history' ? 'active' : '')} onClick={()=>setTab('history')}><History size={15}/> HISTORY <span>{history.length}</span></button>
+      <button className={'rail-btn ' + (tab==='generate' ? 'active' : '')} onClick={()=>{setTab('generate');setSettingsOpen(false)}}><WandSparkles size={15}/> GENERATE</button>
+      <button className={'rail-btn ' + (tab==='history' ? 'active' : '')} onClick={()=>{setTab('history');setSettingsOpen(false)}}><History size={15}/> HISTORY <span>{history.length}</span></button>
+      <button className={'rail-btn ' + (settingsOpen ? 'active' : '')} onClick={()=>setSettingsOpen(v=>!v)}><Settings2 size={15}/> SETTINGS</button>
 
-      <div className="rail-spacer"/>
-      <div className="root-box">
-        <div className="root-label">COMFYUI ROOT</div>
-        <div className="root-path">{comfyRoot}</div>
-        <button onClick={()=>void pickFolder(setComfyRoot)} disabled={!isTauriRuntime}><FolderOpen size={13}/> BROWSE</button>
+      <div className="recent-heading">RECENT</div>
+      <div className="recent-images">
+        {history.filter(item=>item.imageDataUrl).slice(0,8).map(item=>
+          <button className="recent-image" key={item.id} onClick={()=>openHistory(item.id)} title={new Date(item.timestamp).toLocaleString()}>
+            <img src={item.imageDataUrl} alt=""/>
+          </button>
+        )}
+        {!history.some(item=>item.imageDataUrl) && <div className="recent-empty">NO IMAGES</div>}
       </div>
 
       {webHost && <div className="host-box">
-        <div className="root-label">LAN WEB HOST</div>
+        <div className="root-label">WEB HOST</div>
         <div className="host-url">{webHost.lanUrl}</div>
         <button onClick={()=>void copy(webHost.lanUrl)}><Copy size={12}/> COPY ADDRESS</button>
       </div>}
-    </aside>
 
-    <main className="content">
-      <section className="stage-strip">
-        {stages.map((s,i)=><div className={'stage ' + status[s.key] + ' ' + (stage===s.key ? 'current' : '')} key={s.key}>
-          <div className="stage-index">{status[s.key]==='done' ? <Check size={12}/> : status[s.key]==='error' ? <CircleAlert size={12}/> : i+1}</div>
-          <div className="stage-label">{s.label}</div>
-        </div>)}
-      </section>
-
-      {tab==='generate' && <>
-        <section className="config-strip">
-          <div className="config-card">
-            <div className="config-card-head">
-              <div><div className="kicker">ACTIVE MODEL</div><div className="config-title">{selected?.name || 'NO CHECKPOINT SELECTED'}</div></div>
-              <button onClick={()=>setModelSettingsOpen(true)}><Layers3 size={12}/> EDIT MODELS</button>
-            </div>
-            <div className="config-meta">{selected?.baseModel || 'BASE UNKNOWN'} · {manualLoras.length} compatible LoRAs selected · {selectedLoraIds.length} saved in session</div>
+      {settingsOpen && <div className="settings-drawer">
+        <div className="drawer-head">
+          <div>
+            <div className="kicker">GENERATION</div>
+            <div className="drawer-title">SETTINGS</div>
           </div>
-
-          <div className="config-card">
-            <div className="config-card-head">
-              <div><div className="kicker">GENERATION PROFILE</div><div className="config-title">{demographic.toUpperCase()} · {llm.model || 'NO LLM MODEL'}</div></div>
-              <button onClick={openGenerationSettings}><Settings2 size={12}/> EDIT GENERATION</button>
-            </div>
-            <div className="config-meta">
-              {constraints.setting || 'random setting'} · {constraints.pose || 'random pose'} · {constraints.expression || 'random expression'} · max {maxLoras} LoRAs
-            </div>
-          </div>
-        </section>
-
-        <section className="lower-grid">
-          <div className="panel prompt-panel">
-            <div className="panel-head">
-              <div><div className="kicker">STREAMED MODEL OUTPUT</div><div className="panel-title">PROMPT ENGINE</div></div>
-              <span className="provider-chip">{provider==='ollama' ? 'OLLAMA' : 'OPENAI COMPAT'}</span>
-            </div>
-            <div className="stream-box">{stream
-              ? <pre>{stream}</pre>
-              : <div className="stream-placeholder"><Terminal size={18}/><span>LLM output will stream here token by token.</span></div>}
-            </div>
-
-            {prompts && <div className="prompt-result">
-              <div className="prompt-block">
-                <div className="prompt-block-head"><span>POSITIVE</span><button onClick={()=>void copy(prompts.positive_prompt)}><Copy size={12}/> COPY</button></div>
-                <div className="prompt-text">{prompts.positive_prompt}</div>
-              </div>
-              <div className="prompt-block">
-                <div className="prompt-block-head"><span>NEGATIVE</span><button onClick={()=>void copy(prompts.negative_prompt)}><Copy size={12}/> COPY</button></div>
-                <div className="prompt-text">{prompts.negative_prompt}</div>
-              </div>
-            </div>}
-
-            {prepared && <div className="stack-preview">
-              <div className="stack-head"><span>ACTIVE LoRA STACK</span><span>{prepared.loras.length} / {maxLoras}</span></div>
-              {prepared.loras.map(l=><div className="stack-item" key={l.id}>
-                <span className={'stack-dot ' + (l.character ? 'character' : '')}/>
-                <div><b>{l.name}</b><small>{l.activationTags.join(', ') || 'no activation metadata'}</small></div>
-                <strong>{l.weight.toFixed(2)}</strong>
-              </div>)}
-            </div>}
-
-            <div className="run-row">
-              <button className="secondary-btn" disabled={busy || !selected} onClick={()=>void rollStack()}><RefreshCw size={14}/> RANDOMIZE LoRAs</button>
-              <button className="primary-btn" disabled={busy || !selected || !llm.model} onClick={()=>void generate()}><Play size={15}/> {busy ? 'GENERATING…' : 'GENERATE'}</button>
-            </div>
-          </div>
-        </section>
-
-        <section className="panel generation-result-panel">
-          <div className="panel-head">
-            <div><div className="kicker">COMFYUI GENERATION MONITOR</div><div className="panel-title">IMAGE OUTPUT</div></div>
-            <span className="provider-chip">{comfyStatus==='done' ? 'COMPLETE' : comfyStatus==='error' ? 'ERROR' : comfyStatus==='idle' ? 'IDLE' : comfyStatus.toUpperCase()}</span>
-          </div>
-          <div className="comfy-progress-wrap">
-            <div className="comfy-progress-meta">
-              <span>{comfyCurrentStep && comfyTotalSteps ? 'STEP ' + comfyCurrentStep + ' / ' + comfyTotalSteps : comfyStatus==='done' ? 'COMPLETE' : 'WAITING FOR COMFYUI'}</span>
-              <strong>{Math.round(comfyProgress)}%</strong>
-            </div>
-            <div className="comfy-progress-track"><div className="comfy-progress-fill" style={{width:comfyProgress + '%'}}/></div>
-            {comfyCurrentNode && <div className="comfy-node">NODE {comfyCurrentNode}</div>}
-          </div>
-
-          {resultImage ? <div className="result-image-wrap">
-            <img className="result-image" src={resultImage} alt={resultFilename || 'Generated result'}/>
-            {resultFilename && <div className="result-filename">{resultFilename}</div>}
-          </div> :
-          <div className="result-placeholder"><WandSparkles size={22}/><span>{comfyStatus==='error' ? 'Generation failed. See the error message below.' : 'Your generated image will appear here when ComfyUI finishes.'}</span></div>}
-        </section>
-      </>}
-
-      {tab==='history' && <section className="history-panel">
-        <div className="section-head">
-          <div><div className="kicker">LOCAL RUN ARCHIVE</div><div className="section-title">GENERATION HISTORY</div></div>
-          <button onClick={()=>void loadHistory()}><RefreshCw size={13}/> REFRESH</button>
-        </div>
-        {!history.length
-          ? <div className="empty-state"><History size={22}/><div><b>NO GENERATIONS RECORDED</b><span>Prompt, LoRA, workflow and ComfyUI records appear here.</span></div></div>
-          : <div className="history-list">{history.map(item=><article className="history-card" key={item.id}>
-            <div className="history-main">
-              <div className="history-meta"><span>{new Date(item.timestamp).toLocaleString()}</span><span>{item.model || '—'}</span><span>{item.checkpoint.name}</span></div>
-              <div className="history-scene">{item.scene.character} · {item.scene.setting} · {item.scene.pose} · {item.scene.expression}</div>
-              <div className="history-loras">{item.loras.map(l=><span key={l.id}>{l.name}</span>)}</div>
-            </div>
-            <button className="icon-btn" onClick={()=>void copy(item.positivePrompt)}><Copy size={14}/></button>
-          </article>)}</div>}
-      </section>}
-
-      {error && <div className="error-box"><CircleAlert size={14}/><span>{error}</span></div>}
-      {toast && <div className="toast">{toast}</div>}
-      {webHostError && <div className="error-box"><CircleAlert size={14}/><span>{webHostError}</span></div>}
-    </main>
-
-    <aside className="right-rail">
-      <div className="rail-label">ACTIVE CHECKPOINT</div>
-      {selected ? <div className="active-model">
-        <div className="active-model-thumb">{thumbs[selected.id] ? <img src={thumbs[selected.id]} alt=""/> : <Layers3 size={24}/>}</div>
-        <div className="active-name">{selected.name}</div>
-        <div className="active-sub">{selected.baseModel || 'BASE NOT RESOLVED'}</div>
-        <div className="active-tags">{selected.tags.slice(0,7).map(t=><span key={t}>{t}</span>)}</div>
-      </div> : <div className="active-empty">SELECT A CHECKPOINT</div>}
-      <div className="rail-divider"/>
-      <div className="rail-label">SESSION LoRAs</div>
-      <div className="active-tags">{selectedLoraIds.length ? selectedLoraIds.slice(0,8).map(id=><span key={id}>{library?.loras.find(l=>l.id===id)?.name || id}</span>) : <span>NONE</span>}</div>
-      <div className="rail-divider"/><div className="rail-label">LIVE STATUS</div>
-      <div className="stage-stack">{stages.map(s=><div className="mini-stage" key={s.key}><span className={'status ' + status[s.key]}/><span>{s.label}</span><b>{status[s.key].toUpperCase()}</b></div>)}</div>
-    </aside>
-
-    {generationSettingsOpen && <div className="overlay">
-      <div className="modal generation-modal">
-        <div className="modal-head">
-          <div><div className="kicker">CONFIGURATION / LLM + SCENE</div><div className="section-title">GENERATION SETTINGS</div></div>
-          <button className="icon-btn" onClick={()=>setGenerationSettingsOpen(false)}><X size={16}/></button>
+          <button className="icon-btn" onClick={()=>setSettingsOpen(false)}><X size={16}/></button>
         </div>
 
-        <div className="modal-scroll">
+        <div className="drawer-scroll">
           <section className="settings-section">
             <div className="settings-section-title">MODEL PROVIDER</div>
             <div className="provider-toggle">
@@ -824,23 +749,21 @@ function App(){
               <button className={generationDraft.llm.provider==='openai-compatible' ? 'active' : ''} onClick={()=>setGenerationDraft(d=>({...d,llm:{...d.llm,provider:'openai-compatible',baseUrl:'http://127.0.0.1:8080/v1'}}))}>OPENAI COMPATIBLE</button>
             </div>
             <div className="field-grid">
-              <label className="wide-field"><span>BASE URL</span><input value={generationDraft.llm.baseUrl} onChange={e=>setGenerationDraft(d=>({...d,llm:{...d.llm,baseUrl:e.target.value}}))}/></label>
-              <label className="wide-field"><span>API KEY / OPTIONAL</span><input type="password" value={generationDraft.llm.apiKey} onChange={e=>setGenerationDraft(d=>({...d,llm:{...d.llm,apiKey:e.target.value}}))}/></label>
-              <label className="wide-field"><span>MODEL</span>
+              <label className="wide-field full-width"><span>BASE URL</span><input value={generationDraft.llm.baseUrl} onChange={e=>setGenerationDraft(d=>({...d,llm:{...d.llm,baseUrl:e.target.value}}))}/></label>
+              <label className="wide-field full-width"><span>API KEY</span><input type="password" value={generationDraft.llm.apiKey} onChange={e=>setGenerationDraft(d=>({...d,llm:{...d.llm,apiKey:e.target.value}}))}/></label>
+              <label className="wide-field full-width"><span>MODEL</span>
                 <select value={generationDraft.llm.model} onChange={e=>setGenerationDraft(d=>({...d,llm:{...d.llm,model:e.target.value}}))}>
-                  <option value="">SELECT MODEL…</option>{models.map(model=><option key={model}>{model}</option>)}
+                  <option value="">SELECT MODEL</option>{models.map(model=><option key={model}>{model}</option>)}
                 </select>
               </label>
-              <div className="inline-controls">
-                <button className="secondary-btn" onClick={()=>void (async()=>{
-                  try{
-                    const found=await fetchModels(generationDraft.llm);
-                    setGenerationDraft(d=>({...d,llm:{...d.llm,model:d.llm.model || found[0] || ''}}));
-                  }catch(e){setError(String(e));}
-                })()}><RefreshCw size={13}/> GET MODELS</button>
-              </div>
+              <button className="secondary-btn full" onClick={()=>void (async()=>{
+                try{
+                  const found=await fetchModels(generationDraft.llm);
+                  setGenerationDraft(d=>({...d,llm:{...d.llm,model:d.llm.model || found[0] || ''}}));
+                }catch(e){setError(String(e));}
+              })()}><RefreshCw size={13}/> GET MODELS</button>
               <label className="wide-field"><span>TEMPERATURE · {generationDraft.llm.temperature.toFixed(2)}</span><input type="range" min={0} max={2} step={0.05} value={generationDraft.llm.temperature} onChange={e=>setGenerationDraft(d=>({...d,llm:{...d.llm,temperature:Number(e.target.value)}}))}/></label>
-              <label className="wide-field"><span>MAX OUTPUT TOKENS</span><input type="number" min={128} max={16384} value={generationDraft.llm.maxTokens} onChange={e=>setGenerationDraft(d=>({...d,llm:{...d.llm,maxTokens:Math.max(128,Number(e.target.value))}}))}/></label>
+              <label className="wide-field"><span>MAX TOKENS</span><input type="number" min={128} max={16384} value={generationDraft.llm.maxTokens} onChange={e=>setGenerationDraft(d=>({...d,llm:{...d.llm,maxTokens:Math.max(128,Number(e.target.value))}}))}/></label>
             </div>
           </section>
 
@@ -869,19 +792,25 @@ function App(){
           </section>
 
           <section className="settings-section">
-            <div className="settings-section-title">SCENE + LoRA LIMITS</div>
+            <div className="settings-section-title">SCENE</div>
             <div className="field-grid">
               {(['setting','pose','expression','character','dress','composition','additional'] as const).map(key=>
                 <label className={'wide-field ' + (key==='additional' ? 'full-width' : '')} key={key}>
                   <span>{key.replace('_',' ').toUpperCase()}</span>
                   {key==='additional'
-                    ? <textarea className="settings-textarea" value={generationDraft.constraints[key]} onChange={e=>setGenerationDraft(d=>({...d,constraints:{...d.constraints,[key]:e.target.value}}))} placeholder="Anything the prompt engine must obey…"/>
-                    : <input value={generationDraft.constraints[key]} onChange={e=>setGenerationDraft(d=>({...d,constraints:{...d.constraints,[key]:e.target.value}}))} placeholder={key==='character' ? 'compatible character LoRA only' : 'blank = random'}/>}
+                    ? <textarea className="settings-textarea" value={generationDraft.constraints[key]} onChange={e=>setGenerationDraft(d=>({...d,constraints:{...d.constraints,[key]:e.target.value}}))} placeholder="Additional prompt constraints"/>
+                    : <input value={generationDraft.constraints[key]} onChange={e=>setGenerationDraft(d=>({...d,constraints:{...d.constraints,[key]:e.target.value}}))} placeholder={key==='character' ? 'Compatible character LoRA' : 'Random if blank'}/>}
                 </label>
               )}
+            </div>
+          </section>
+
+          <section className="settings-section">
+            <div className="settings-section-title">LORA LIMITS</div>
+            <div className="field-grid">
               <label className="wide-field"><span>MAX LoRAs</span><input type="number" min={1} max={16} value={generationDraft.maxLoras} onChange={e=>setGenerationDraft(d=>({...d,maxLoras:Math.max(1,Number(e.target.value))}))}/></label>
-              <label className="wide-field"><span>RANDOM LoRA MIN</span><input type="number" min={1} max={16} value={generationDraft.randomLoraMin} onChange={e=>setGenerationDraft(d=>({...d,randomLoraMin:Math.max(1,Number(e.target.value))}))}/></label>
-              <label className="wide-field"><span>RANDOM LoRA MAX</span><input type="number" min={1} max={16} value={generationDraft.randomLoraMax} onChange={e=>setGenerationDraft(d=>({...d,randomLoraMax:Math.max(1,Number(e.target.value))}))}/></label>
+              <label className="wide-field"><span>RANDOM MIN</span><input type="number" min={1} max={16} value={generationDraft.randomLoraMin} onChange={e=>setGenerationDraft(d=>({...d,randomLoraMin:Math.max(1,Number(e.target.value))}))}/></label>
+              <label className="wide-field"><span>RANDOM MAX</span><input type="number" min={1} max={16} value={generationDraft.randomLoraMax} onChange={e=>setGenerationDraft(d=>({...d,randomLoraMax:Math.max(1,Number(e.target.value))}))}/></label>
             </div>
           </section>
 
@@ -897,63 +826,212 @@ function App(){
           </section>
         </div>
 
-        <div className="modal-foot">
-          <button className="secondary-btn" onClick={()=>setGenerationSettingsOpen(false)}>CANCEL</button>
-          <button className="primary-btn" onClick={saveGenerationSettings}>SAVE GENERATION SETTINGS</button>
+        <div className="drawer-foot">
+          <button className="secondary-btn" onClick={()=>setSettingsOpen(false)}>CANCEL</button>
+          <button className="primary-btn" onClick={saveGenerationSettings}>SAVE SETTINGS</button>
+        </div>
+      </div>}
+    </aside>
+
+    <main className="content">
+      <section className="stage-strip">
+        {stages.map((s,i)=><div className={'stage ' + status[s.key] + ' ' + (stage===s.key ? 'current' : '')} key={s.key}>
+          <div className="stage-index">{status[s.key]==='done' ? <Check size={12}/> : status[s.key]==='error' ? <CircleAlert size={12}/> : i+1}</div>
+          <div className="stage-label">{s.label}</div>
+        </div>)}
+      </section>
+
+      {tab==='generate' && <>
+        <section className="workspace-panel">
+          <div className="panel-head">
+            <div>
+              <div className="kicker">PROMPT ENGINE</div>
+              <div className="panel-title">GENERATION</div>
+            </div>
+            <div className="workspace-meta">
+              <span>{llm.model || 'NO LLM MODEL'}</span>
+              <span>{selected?.name || 'NO CHECKPOINT'}</span>
+              <span>{selectedLoraIds.length} LoRAs</span>
+            </div>
+          </div>
+
+          <div className="stream-box">{stream
+            ? <pre>{stream}</pre>
+            : <div className="stream-placeholder"><Terminal size={18}/><span>Prompt output appears here.</span></div>}
+          </div>
+
+          {prompts && <div className="prompt-result">
+            <div className="prompt-block">
+              <div className="prompt-block-head"><span>POSITIVE</span><button onClick={()=>void copy(prompts.positive_prompt)}><Copy size={12}/> COPY</button></div>
+              <div className="prompt-text">{prompts.positive_prompt}</div>
+            </div>
+            <div className="prompt-block">
+              <div className="prompt-block-head"><span>NEGATIVE</span><button onClick={()=>void copy(prompts.negative_prompt)}><Copy size={12}/> COPY</button></div>
+              <div className="prompt-text">{prompts.negative_prompt}</div>
+            </div>
+          </div>}
+
+          {prepared && <div className="stack-preview">
+            <div className="stack-head"><span>ACTIVE LORA STACK</span><span>{prepared.loras.length} / {maxLoras}</span></div>
+            {prepared.loras.map(l=><div className="stack-item" key={l.id}>
+              <span className={'stack-dot ' + (l.character ? 'character' : '')}/>
+              <div><b>{l.name}</b><small>{l.activationTags.join(', ') || 'NO ACTIVATION METADATA'}</small></div>
+              <strong>{l.weight.toFixed(2)}</strong>
+            </div>)}
+          </div>}
+
+          <div className="run-row">
+            <button className="secondary-btn" disabled={busy || !selected} onClick={()=>void rollStack()}><RefreshCw size={14}/> RANDOMIZE LORAS</button>
+            <button className="primary-btn" disabled={busy || !selected || !llm.model} onClick={()=>void generate()}><Play size={15}/> {busy ? 'GENERATING' : 'GENERATE'}</button>
+          </div>
+        </section>
+
+        <section className="panel generation-result-panel">
+          <div className="panel-head">
+            <div><div className="kicker">COMFYUI</div><div className="panel-title">IMAGE OUTPUT</div></div>
+            <span className="provider-chip">{comfyStatus==='done' ? 'COMPLETE' : comfyStatus==='error' ? 'ERROR' : comfyStatus==='idle' ? 'IDLE' : comfyStatus.toUpperCase()}</span>
+          </div>
+          <div className="comfy-progress-wrap">
+            <div className="comfy-progress-meta">
+              <span>{comfyCurrentStep && comfyTotalSteps ? 'STEP ' + comfyCurrentStep + ' / ' + comfyTotalSteps : comfyStatus==='done' ? 'COMPLETE' : 'WAITING'}</span>
+              <strong>{Math.round(comfyProgress)}%</strong>
+            </div>
+            <div className="comfy-progress-track"><div className="comfy-progress-fill" style={{width:comfyProgress + '%'}}/></div>
+            {comfyCurrentNode && <div className="comfy-node">NODE {comfyCurrentNode}</div>}
+          </div>
+
+          {resultImage ? <div className="result-image-wrap">
+            <img className="result-image" src={resultImage} alt={resultFilename || 'Generated result'}/>
+            {resultFilename && <div className="result-filename">{resultFilename}</div>}
+          </div> :
+          <div className="result-placeholder"><WandSparkles size={22}/><span>{comfyStatus==='error' ? 'GENERATION FAILED' : 'NO IMAGE YET'}</span></div>}
+        </section>
+      </>}
+
+      {tab==='history' && <section className="history-panel history-detail-panel">
+        {!selectedHistory ? (
+          <div className="empty-state"><History size={22}/><div><b>NO GENERATIONS</b><span>Completed generations will appear here.</span></div></div>
+        ) : <>
+          <div className="history-detail-head">
+            <button className="ghost-btn" onClick={()=>setSelectedHistoryId('')}>ALL HISTORY</button>
+            <div className="history-detail-meta">{new Date(selectedHistory.timestamp).toLocaleString()}</div>
+          </div>
+
+          <div className="history-detail-image-wrap">
+            {selectedHistory.imageDataUrl
+              ? <img className="history-detail-image" src={selectedHistory.imageDataUrl} alt={selectedHistory.imageFilename || 'Generated image'}/>
+              : <div className="history-detail-no-image"><WandSparkles size={24}/><span>IMAGE NOT STORED</span></div>}
+            {selectedHistory.imageFilename && <div className="result-filename">{selectedHistory.imageFilename}</div>}
+          </div>
+
+          <button className="secondary-btn history-settings-toggle" onClick={()=>setHistorySettingsVisible(v=>!v)}>
+            <Settings2 size={13}/> {historySettingsVisible ? 'HIDE GENERATION SETTINGS' : 'VIEW GENERATION SETTINGS'}
+          </button>
+
+          {historySettingsVisible && selectedHistory.generationSettings && <section className="history-settings-card">
+            <div className="history-section-title">GENERATION SETTINGS</div>
+            <div className="history-grid">
+              <div><span>PROVIDER</span><b>{selectedHistory.generationSettings.llm.provider}</b></div>
+              <div><span>MODEL</span><b>{selectedHistory.generationSettings.llm.model || '—'}</b></div>
+              <div><span>DEMOGRAPHIC</span><b>{selectedHistory.generationSettings.demographic.toUpperCase()}</b></div>
+              <div><span>TEMPERATURE</span><b>{selectedHistory.generationSettings.llm.temperature.toFixed(2)}</b></div>
+              <div><span>MAX TOKENS</span><b>{selectedHistory.generationSettings.llm.maxTokens}</b></div>
+              <div><span>SIZE</span><b>{selectedHistory.generationSettings.width} × {selectedHistory.generationSettings.height}</b></div>
+              <div><span>STEPS</span><b>{selectedHistory.generationSettings.steps}</b></div>
+              <div><span>CFG</span><b>{selectedHistory.generationSettings.cfg}</b></div>
+              <div><span>SAMPLER</span><b>{selectedHistory.generationSettings.sampler}</b></div>
+              <div><span>MAX LORAS</span><b>{selectedHistory.generationSettings.maxLoras}</b></div>
+            </div>
+
+            <div className="history-section-title">SCENE</div>
+            <div className="history-text-grid">
+              {Object.entries(selectedHistory.generationSettings.constraints).map(([key,value])=><div key={key}><span>{key.toUpperCase()}</span><b>{String(value) || 'RANDOM'}</b></div>)}
+            </div>
+
+            <div className="history-section-title">SYSTEM PROMPT</div>
+            <pre className="history-code">{selectedHistory.generationSettings.systemPrompt}</pre>
+            <div className="history-section-title">DEMOGRAPHIC PROMPT</div>
+            <pre className="history-code">{selectedHistory.generationSettings.demographicPrompts[selectedHistory.generationSettings.demographic]}</pre>
+          </section>}
+
+          <section className="history-settings-card">
+            <div className="history-section-title">MODELS</div>
+            <div className="history-model-header">
+              {selectedHistory.checkpoint.thumbnail && thumbs[selectedHistory.checkpoint.id]
+                ? <img src={thumbs[selectedHistory.checkpoint.id]} alt=""/>
+                : <div className="history-model-placeholder"><Layers3 size={20}/></div>}
+              <div><b>{selectedHistory.checkpoint.name}</b><span>{selectedHistory.checkpoint.baseModel || 'BASE UNKNOWN'}</span></div>
+            </div>
+            <div className="history-lora-detail">
+              {selectedHistory.loras.map(l=><div className="history-lora-row" key={l.id}><span className={'stack-dot ' + (l.character ? 'character' : '')}/><div><b>{l.name}</b><span>{l.tags.join(', ') || 'NO TAGS'}</span></div><strong>{l.weight.toFixed(2)}</strong></div>)}
+            </div>
+          </section>
+
+          <section className="history-settings-card">
+            <div className="history-section-title">POSITIVE PROMPT</div>
+            <div className="history-full-prompt">{selectedHistory.positivePrompt}</div>
+            <div className="history-section-title">NEGATIVE PROMPT</div>
+            <div className="history-full-prompt">{selectedHistory.negativePrompt}</div>
+            {selectedHistory.rationale && <><div className="history-section-title">RATIONALE</div><div className="history-full-prompt">{selectedHistory.rationale}</div></>}
+          </section>
+        </>}
+
+        {!selectedHistoryId && history.length>0 && <div className="history-list">
+          {history.map(item=><button className="history-list-item" key={item.id} onClick={()=>openHistory(item.id)}>
+            <div className="history-list-thumb">{item.imageDataUrl ? <img src={item.imageDataUrl} alt=""/> : <WandSparkles size={18}/>}</div>
+            <div>
+              <b>{new Date(item.timestamp).toLocaleString()}</b>
+              <span>{item.checkpoint.name}</span>
+              <small>{item.model || 'NO LLM MODEL'} · {item.loras.length} LORAS</small>
+            </div>
+            <span className="history-list-arrow">OPEN</span>
+          </button>)}
+        </div>}
+      </section>}
+
+      {error && <div className="error-box"><CircleAlert size={14}/><span>{error}</span></div>}
+      {toast && <div className="toast">{toast}</div>}
+      {webHostError && <div className="error-box"><CircleAlert size={14}/><span>{webHostError}</span></div>}
+    </main>
+
+    <aside className="right-rail">
+      <div className="rail-label">MODELS</div>
+      {selected && <div className="selected-model-card">
+        <div className="selected-model-thumb">{thumbs[selected.id] ? <img src={thumbs[selected.id]} alt=""/> : <Layers3 size={22}/>}</div>
+        <div className="selected-model-copy"><b>{selected.name}</b><span>{selected.baseModel || 'BASE UNKNOWN'}</span></div>
+      </div>}
+
+      <div className="right-section">
+        <div className="right-section-head"><span>CHECKPOINTS</span><span>{filteredCheckpoints.length}</span></div>
+        <div className="search-row compact"><Search size={13}/><input value={checkpointSearch} onChange={e=>setCheckpointSearch(e.target.value)} placeholder="Search checkpoints"/></div>
+        <div className="checkpoint-list">
+          {filteredCheckpoints.map(model=><button key={model.id} className={'checkpoint-row ' + (selected?.id===model.id ? 'selected' : '')} onClick={()=>selectCheckpoint(model.id)}>
+            <div className="checkpoint-row-thumb">{thumbs[model.id] ? <img src={thumbs[model.id]} alt=""/> : <Layers3 size={16}/>}</div>
+            <div className="checkpoint-row-copy"><b>{model.name}</b><span>{model.baseModel || 'BASE UNKNOWN'}</span><small>{model.tags.slice(0,3).join(' · ')}</small></div>
+            {selected?.id===model.id && <Check size={14}/>}
+          </button>)}
         </div>
       </div>
-    </div>}
 
-    {modelSettingsOpen && <div className="overlay">
-      <div className="modal model-modal">
-        <div className="modal-head">
-          <div><div className="kicker">LIBRARY / RAPHAEL CACHE</div><div className="section-title">MODEL SETTINGS</div></div>
-          <button className="icon-btn" onClick={()=>setModelSettingsOpen(false)}><X size={16}/></button>
-        </div>
-
-        <div className="modal-scroll">
-          <section className="settings-section">
-            <div className="settings-section-title">GENERATION BACKEND</div>
-            <div className="field-grid">
-              <label className="wide-field"><span>COMFYUI API</span><input value={comfyUrl} onChange={e=>setComfyUrl(e.target.value)}/></label>
-              <label className="wide-field"><span>COMFYUI MODELS ROOT</span><div className="input-button"><input value={comfyRoot} onChange={e=>setComfyRoot(e.target.value)}/><button onClick={()=>void pickFolder(setComfyRoot)} disabled={!isTauriRuntime}><FolderOpen size={13}/></button></div></label>
-              <label className="wide-field"><span>RAPHAEL MANAGER DB / CACHE</span><div className="input-button"><input value={raphaelRoot} onChange={e=>setRaphaelRoot(e.target.value)}/><button onClick={()=>void pickFolder(setRaphaelRoot)} disabled={!isTauriRuntime}><FolderOpen size={13}/></button></div></label>
-            </div>
-            <button className="primary-btn full" onClick={()=>void scan()}><RefreshCw size={13}/> SCAN + MERGE CACHE</button>
-          </section>
-
-          <section className="settings-section">
-            <div className="settings-section-title">SELECT CHECKPOINT</div>
-            <div className="search-row"><Search size={14}/><input value={checkpointSearch} onChange={e=>setCheckpointSearch(e.target.value)} placeholder="Search checkpoints, base models or tags…"/></div>
-            <div className="model-modal-grid">
-              {filteredCheckpoints.map(model=><button key={model.id} className={'modal-model-card ' + (selected?.id===model.id ? 'selected' : '')} onClick={()=>setSelectedId(model.id)}>
-                <div className="modal-model-thumb">{thumbs[model.id] ? <img src={thumbs[model.id]} alt=""/> : <Layers3 size={26}/>}<span>{model.baseModel || 'UNKNOWN'}</span></div>
-                <div className="model-body"><div className="model-name">{model.name}</div><div className="model-type">CHECKPOINT</div><div className="model-tags">{model.tags.slice(0,5).map(t=><span key={t}>{t}</span>)}</div></div>
-              </button>)}
-            </div>
-          </section>
-
-          <section className="settings-section">
-            <div className="settings-section-title">SELECT LoRAs · {selectedLoraIds.length} SAVED / {compatibleLoras.length} COMPATIBLE</div>
-            <div className="search-row"><Search size={14}/><input value={loraSearch} onChange={e=>setLoraSearch(e.target.value)} placeholder="Search compatible LoRAs, tags or base model…"/></div>
-            <div className="session-note">Selections are session-persistent. They remain selected until you explicitly unselect them or close the app.</div>
-            <div className="model-modal-grid lora-modal-grid">
-              {filteredLoras.map(lora=><button key={lora.id} className={'modal-model-card ' + (selectedLoraIds.includes(lora.id) ? 'selected' : '')} onClick={()=>toggleLora(lora.id)}>
-                <div className="modal-model-thumb">{thumbs[lora.id] ? <img src={thumbs[lora.id]} alt=""/> : <Layers3 size={26}/>} {lora.character && <span>CHARACTER</span>}</div>
-                <div className="model-body"><div className="model-name">{lora.name}</div><div className="model-type">{lora.character ? 'CHARACTER LoRA' : 'SUPPORT LoRA'}</div><div className="model-tags">{lora.tags.slice(0,6).map(t=><span key={t}>{t}</span>)}</div></div>
-                <div className="modal-check">{selectedLoraIds.includes(lora.id) ? <Check size={13}/> : null}</div>
-              </button>)}
-            </div>
-          </section>
-        </div>
-
-        <div className="modal-foot">
-          <button className="secondary-btn" onClick={()=>setSelectedLoraIds([])}>UNSELECT ALL LoRAs</button>
-          <button className="primary-btn" onClick={()=>setModelSettingsOpen(false)}>DONE</button>
+      <div className="right-section lora-section">
+        <div className="right-section-head"><span>LORAS</span><span>{selectedLoraIds.length} / {compatibleLoras.length}</span></div>
+        <div className="search-row compact"><Search size={13}/><input value={loraSearch} onChange={e=>setLoraSearch(e.target.value)} placeholder="Search LoRAs"/></div>
+        <div className="lora-list">
+          {filteredLoras.map(lora=><button key={lora.id} className={'lora-row ' + (selectedLoraIds.includes(lora.id) ? 'selected' : '')} onClick={()=>toggleLora(lora.id)}>
+            <div className="lora-row-thumb">{thumbs[lora.id] ? <img src={thumbs[lora.id]} alt=""/> : <Layers3 size={15}/>}</div>
+            <div className="lora-row-copy"><b>{lora.name}</b><span>{lora.character ? 'CHARACTER' : 'SUPPORT'}</span><small>{lora.tags.slice(0,3).join(' · ')}</small></div>
+            {selectedLoraIds.includes(lora.id) && <Check size={14}/>}
+          </button>)}
         </div>
       </div>
-    </div>}
-  </div>;
-}
 
+      <div className="right-section backend-section">
+        <div className="right-section-head"><span>BACKEND</span></div>
+        <label className="compact-field"><span>COMFYUI API</span><input value={comfyUrl} onChange={e=>setComfyUrl(e.target.value)}/></label>
+        <label className="compact-field"><span>MODELS ROOT</span><input value={comfyRoot} onChange={e=>setComfyRoot(e.target.value)}/></label>
+        <label className="compact-field"><span>RAPHAEL DB / CACHE</span><input value={raphaelRoot} onChange={e=>setRaphaelRoot(e.target.value)}/></label>
+        <button className="secondary-btn full" onClick={()=>void scan()}><RefreshCw size={13}/> SCAN LIBRARY</button>
+      </div>
+    </aside>
+  </div>
 export default App;
