@@ -40,8 +40,8 @@ export interface Constraints {
   dress: string;
   composition: string;
   additional: string;
-  randomLoRaMin: number;
-  randomLoRaMax: number;
+  randomLoraMin: number;
+  randomLoraMax: number;
 }
 
 export interface SceneSelection {
