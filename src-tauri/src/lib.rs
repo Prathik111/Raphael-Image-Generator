@@ -1,4 +1,15 @@
 use anyhow::{anyhow, Result};
+use axum::{
+    extract::{Json as AxumJson, Path as AxumPath, State as AxumState},
+    http::StatusCode,
+    response::{
+        sse::{Event, KeepAlive, Sse},
+        IntoResponse,
+        Response,
+    },
+    routing::{get, post},
+    Router,
+};
 use base64::Engine;
 use futures_util::StreamExt;
 use rand::{prelude::IndexedRandom, seq::SliceRandom, Rng};
@@ -11,6 +22,8 @@ use tauri::ipc::Channel;
 use tokio::sync::Mutex;
 use tokio::time::{sleep, timeout};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio_stream::{wrappers::UnboundedReceiverStream, Stream};
+use tower_http::services::ServeDir;
 use walkdir::WalkDir;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -140,8 +153,22 @@ struct ComfyGenerationResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct HistoryRecord { id: String, timestamp: String, payload: Value }
 
+struct WebHostRuntime {
+    port: u16,
+    lan_url: String,
+    task: tokio::task::JoinHandle<()>,
+}
+
 #[derive(Clone)]
-struct AppState { active_stream: Arc<Mutex<bool>> }
+struct AppState {
+    active_stream: Arc<Mutex<bool>>,
+    web_host: Arc<Mutex<Option<WebHostRuntime>>>,
+}
+
+#[derive(Clone)]
+struct WebApiState {
+    app: AppHandle,
+}
 
 fn norm(s: &str) -> String { s.trim().to_lowercase().replace([' ', '_', '-', '.', '/'], "") }
 fn base_url(s: &str) -> String { s.trim().trim_end_matches('/').to_string() }
@@ -592,12 +619,16 @@ async fn stream_llm(
         if *busy{return Err("An LLM stream is already active.".into())}
         *busy=true;
     }
-    let result=stream_inner(req,on_event).await;
+    let result=stream_llm_inner(req, |delta| {
+        on_event.send(delta).map_err(|e|format!("LLM stream channel closed: {}",e))
+    }).await;
     *state.active_stream.lock().await=false;
     result
 }
 
-async fn stream_inner(req:LlmRequest,on_event:Channel<LlmDelta>)->Result<(),String>{
+async fn stream_llm_inner<F>(req:LlmRequest, mut emit:F)->Result<(),String>
+where F:FnMut(LlmDelta)->Result<(),String> + Send
+{
     let client=reqwest::Client::new();
     let base=base_url(&req.settings.base_url);
     let (url,mut body,ollama)=if req.settings.provider=="ollama"{
@@ -653,35 +684,18 @@ async fn stream_inner(req:LlmRequest,on_event:Channel<LlmDelta>)->Result<(),Stri
             let line=buffer[..pos].trim_end_matches('\r').to_string();
             buffer=buffer[pos+1..].to_string();
             if line.trim().is_empty(){continue}
-
-            let data=if ollama{
-                line.trim()
-            }else{
-                line.strip_prefix("data: ").unwrap_or("").trim()
-            };
-
+            let data=if ollama{line.trim()}else{line.strip_prefix("data: ").unwrap_or("").trim()};
             if data.is_empty()||data=="[DONE]"{continue}
-
             let v:Value=match serde_json::from_str(data){Ok(x)=>x,Err(_)=>continue};
             let token=if ollama{
                 v.get("message").and_then(|x|x.get("content")).and_then(|x|x.as_str()).unwrap_or("")
             }else{
-                v.get("choices")
-                    .and_then(|x|x.get(0))
-                    .and_then(|x|x.get("delta"))
-                    .and_then(|x|x.get("content"))
-                    .and_then(|x|x.as_str())
-                    .unwrap_or("")
+                v.get("choices").and_then(|x|x.get(0)).and_then(|x|x.get("delta")).and_then(|x|x.get("content")).and_then(|x|x.as_str()).unwrap_or("")
             };
-
-            if !token.is_empty(){
-                on_event.send(LlmDelta{text:token.to_string()})
-                    .map_err(|e|format!("LLM stream channel closed: {}",e))?;
-            }
+            if !token.is_empty(){emit(LlmDelta{text:token.to_string()})?;}
         }
     }
 
-    // Handle a final unterminated line from providers that close without a trailing newline.
     let tail=buffer.trim();
     if !tail.is_empty() && tail!="[DONE]"{
         let data=if ollama{tail}else{tail.strip_prefix("data: ").unwrap_or(tail).trim()};
@@ -690,16 +704,12 @@ async fn stream_inner(req:LlmRequest,on_event:Channel<LlmDelta>)->Result<(),Stri
                 let token=if ollama{
                     v.get("message").and_then(|x|x.get("content")).and_then(|x|x.as_str()).unwrap_or("")
                 }else{
-                    v.get("choices").and_then(|x|x.get(0)).and_then(|x|x.get("delta")).and_then(|x|x.get("content")).and_then(|x|x.as_str()).unwrap_or("")
+                    v.get("choices").and_then(|x|x.get(0)).and_then(|x|x.get("delta")).and_then(|x|x.as_str()).unwrap_or("")
                 };
-                if !token.is_empty(){
-                    on_event.send(LlmDelta{text:token.to_string()})
-                        .map_err(|e|format!("LLM stream channel closed: {}",e))?;
-                }
+                if !token.is_empty(){emit(LlmDelta{text:token.to_string()})?;}
             }
         }
     }
-
     Ok(())
 }
 
@@ -1024,11 +1034,12 @@ async fn fetch_comfy_image(client:&reqwest::Client, base:&str, image:(String,Str
     Ok(format!("data:{};base64,{}",mime,base64::engine::general_purpose::STANDARD.encode(bytes)))
 }
 
-#[tauri::command]
-async fn monitor_comfy_generation(
+async fn monitor_comfy_generation_inner<F>(
     req:MonitorComfyRequest,
-    on_event:Channel<ComfyProgress>,
-)->Result<ComfyGenerationResult,String>{
+    mut emit:F,
+)->Result<ComfyGenerationResult,String>
+where F:FnMut(ComfyProgress)->Result<(),String> + Send
+{
     let base=base_url(&req.comfy_url);
     let ws_url=format!("{}/ws?clientId=raphael-prompt-forge",base.replace("https://","wss://").replace("http://","ws://"));
     let client=reqwest::Client::new();
@@ -1038,28 +1049,19 @@ async fn monitor_comfy_generation(
     let mut last_current=0u32;
     let mut last_total=0u32;
 
-    let _=on_event.send(ComfyProgress{
-        percent:0.0,current:0,total:1,node:None,status:"waiting".into()
-    });
+    let _=emit(ComfyProgress{percent:0.0,current:0,total:1,node:None,status:"waiting".into()});
 
     loop{
         if let Some(history)=fetch_comfy_history(&client,&base,&req.prompt_id).await?{
             if let Some(image_ref)=first_comfy_image(&history){
                 let image_data_url=fetch_comfy_image(&client,&base,image_ref.clone()).await?;
-                let _=on_event.send(ComfyProgress{
-                    percent:100.0,current:1,total:1,node:None,status:"done".into()
-                });
-                return Ok(ComfyGenerationResult{
-                    image_data_url:Some(image_data_url),
-                    filename:Some(image_ref.0),
-                });
+                let _=emit(ComfyProgress{percent:100.0,current:1,total:1,node:None,status:"done".into()});
+                return Ok(ComfyGenerationResult{image_data_url:Some(image_data_url),filename:Some(image_ref.0)});
             }
         }
-
         if started.elapsed()>Duration::from_secs(30*60){
             return Err("ComfyUI generation timed out after 30 minutes.".into());
         }
-
         if let Some(ws)=socket.as_mut(){
             match timeout(Duration::from_millis(250),ws.next()).await{
                 Ok(Some(Ok(Message::Text(text))))=>{
@@ -1073,26 +1075,13 @@ async fn monitor_comfy_generation(
                                     let current=data.get("value").and_then(|x|x.as_u64()).unwrap_or(0) as u32;
                                     let total=data.get("max").and_then(|x|x.as_u64()).unwrap_or(1) as u32;
                                     let percent=if total>0 {current as f32*100.0/total as f32}else{last_percent};
-                                    last_percent=percent.clamp(0.0,100.0);
-                                    last_current=current;
-                                    last_total=total;
-                                    let _=on_event.send(ComfyProgress{
-                                        percent:last_percent,
-                                        current:last_current,total:last_total,
-                                        node:data.get("node").and_then(|x|x.as_str()).map(str::to_string),
-                                        status:"sampling".into(),
-                                    });
+                                    last_percent=percent.clamp(0.0,100.0); last_current=current; last_total=total;
+                                    let _=emit(ComfyProgress{percent:last_percent,current:last_current,total:last_total,node:data.get("node").and_then(|x|x.as_str()).map(str::to_string),status:"sampling".into()});
                                 }
                                 "executing"=>{
                                     let node=data.get("node").and_then(|x|x.as_str()).map(str::to_string);
                                     let progress_status=if node.is_some(){"running".into()}else{"finishing".into()};
-                                    let _=on_event.send(ComfyProgress{
-                                        percent:last_percent,
-                                        current:last_current,
-                                        total:last_total,
-                                        node,
-                                        status:progress_status,
-                                    });
+                                    let _=emit(ComfyProgress{percent:last_percent,current:last_current,total:last_total,node,status:progress_status});
                                 }
                                 "execution_error"=>{
                                     return Err(data.get("exception_message").and_then(|x|x.as_str()).unwrap_or("ComfyUI execution failed.").to_string());
@@ -1102,19 +1091,175 @@ async fn monitor_comfy_generation(
                         }
                     }
                 }
-                Ok(Some(Ok(Message::Close(_))))|Ok(None)=>{
-                    socket=None;
-                }
-                Ok(Some(Err(_)))=>{
-                    socket=None;
-                }
+                Ok(Some(Ok(Message::Close(_))))|Ok(None)=>{socket=None;}
+                Ok(Some(Err(_)))=>{socket=None;}
                 Err(_)=>{}
                 Ok(Some(Ok(_)))=>{}
             }
-        }else{
-            sleep(Duration::from_millis(500)).await;
-        }
+        }else{sleep(Duration::from_millis(500)).await;}
     }
+}
+
+#[tauri::command]
+async fn monitor_comfy_generation(
+    req:MonitorComfyRequest,
+    on_event:Channel<ComfyProgress>,
+)->Result<ComfyGenerationResult,String>{
+    monitor_comfy_generation_inner(req, |progress| {
+        on_event.send(progress).map_err(|e|format!("ComfyUI channel closed: {}",e))
+    }).await
+}
+
+
+fn lan_ip() -> String {
+    std::net::UdpSocket::bind("0.0.0.0:0")
+        .and_then(|socket| {
+            let _ = socket.connect("8.8.8.8:80");
+            socket.local_addr()
+        })
+        .map(|addr| addr.ip().to_string())
+        .unwrap_or_else(|_| "127.0.0.1".into())
+}
+
+fn dist_directory(app:&AppHandle)->Option<PathBuf>{
+    let mut candidates=Vec::new();
+    if let Ok(resource)=app.path().resource_dir(){candidates.push(resource.join("dist"));}
+    candidates.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../dist"));
+    candidates.into_iter().find(|p|p.join("index.html").is_file())
+}
+
+fn http_error(message:String)->Response{
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        AxumJson(json!({"error":message}))
+    ).into_response()
+}
+
+async fn web_command(
+    AxumState(state):AxumState<WebApiState>,
+    AxumPath(command):AxumPath<String>,
+    AxumJson(body):AxumJson<Value>,
+)->Response{
+    let req_value=body.get("req").cloned().unwrap_or_else(||body.clone());
+    let result:Result<Value,String>=match command.as_str(){
+        "discover_raphael_config"=>Ok(serde_json::to_value(discover_raphael_config()).unwrap()),
+        "discover_raphael_roots"=>Ok(serde_json::to_value(discover_raphael_roots()).unwrap()),
+        "list_provider_models"=>{
+            serde_json::from_value::<LlmSettings>(req_value).map_err(|e|e.to_string())
+                .and_then(|x|async move{list_provider_models(x).await}.await)
+                .and_then(|x|serde_json::to_value(x).map_err(|e|e.to_string()))
+        }
+        "scan_library"=>{
+            serde_json::from_value::<ScanRequest>(req_value).map_err(|e|e.to_string())
+                .and_then(|x|scan_library(x))
+                .and_then(|x|serde_json::to_value(x).map_err(|e|e.to_string()))
+        }
+        "prepare_generation"=>{
+            serde_json::from_value::<PrepareRequest>(req_value).map_err(|e|e.to_string())
+                .and_then(|x|prepare_generation(x))
+                .and_then(|x|serde_json::to_value(x).map_err(|e|e.to_string()))
+        }
+        "parse_prompt_pair"=>req_value.as_str().ok_or_else(||"raw prompt text is required".into())
+            .and_then(parse_prompt_pair)
+            .and_then(|x|serde_json::to_value(x).map_err(|e|e.to_string())),
+        "finalize_prompt_pair"=>{
+            serde_json::from_value::<FinalizePromptRequest>(req_value).map_err(|e|e.to_string())
+                .and_then(|x|finalize_prompt_pair(x))
+                .and_then(|x|serde_json::to_value(x).map_err(|e|e.to_string()))
+        }
+        "build_workflow"=>{
+            serde_json::from_value::<WorkflowRequest>(req_value).map_err(|e|e.to_string())
+                .and_then(|x|build_workflow(x))
+                .and_then(|x|serde_json::to_value(x).map_err(|e|e.to_string()))
+        }
+        "inject_prompts"=>{
+            serde_json::from_value::<InjectRequest>(req_value).map_err(|e|e.to_string())
+                .and_then(|x|inject_prompts(x))
+                .and_then(|x|serde_json::to_value(x).map_err(|e|e.to_string()))
+        }
+        "submit_to_comfy"=>{
+            serde_json::from_value::<SubmitRequest>(req_value).map_err(|e|e.to_string())
+                .and_then(|x|async move{submit_to_comfy(x).await}.await)
+                .and_then(|x|serde_json::to_value(x).map_err(|e|e.to_string()))
+        }
+        "load_history"=>load_history(state.app.clone()).and_then(|x|serde_json::to_value(x).map_err(|e|e.to_string())),
+        "append_history"=>{
+            let payload=body.get("payload").cloned().unwrap_or(Value::Null);
+            append_history(state.app.clone(),payload).and_then(|x|serde_json::to_value(x).map_err(|e|e.to_string()))
+        }
+        "path_to_data_url"=>{
+            let path=req_value.get("path").and_then(|x|x.as_str()).or_else(||req_value.as_str()).ok_or_else(||"path is required".to_string())?;
+            path_to_data_url(path.to_string()).and_then(|x|serde_json::to_value(x).map_err(|e|e.to_string()))
+        }
+        _=>Err(format!("Unknown API command: {}",command))
+    };
+    match result{Ok(value)=>AxumJson(value).into_response(),Err(e)=>http_error(e)}
+}
+
+async fn web_stream_llm(
+    AxumJson(body):AxumJson<Value>,
+)->Sse<impl Stream<Item=Result<Event,std::convert::Infallible>>>{
+    let req:Result<LlmRequest,String>=serde_json::from_value(body.get("req").cloned().unwrap_or(body.clone())).map_err(|e|e.to_string());
+    let (tx,rx)=tokio::sync::mpsc::unbounded_channel::<Result<Event,std::convert::Infallible>>();
+    tokio::spawn(async move{
+        match req{
+            Ok(req)=>{
+                let tx2=tx.clone();
+                let mut emit=|delta:LlmDelta|{
+                    let event=Event::default().json_data(json!({"text":delta.text,"done":false})).map_err(|e|format!("sse:{}",e))?;
+                    tx2.send(Ok(event)).map_err(|_|"sse client disconnected".to_string())
+                };
+                match stream_llm_inner(req,&mut emit).await{
+                    Ok(())=>{
+                        let _=tx.send(Ok(Event::default().json_data(json!({"done":true})).unwrap_or_else(|_|Event::default())));
+                    }
+                    Err(e)=>{
+                        let _=tx.send(Ok(Event::default().json_data(json!({"error":e})).unwrap_or_else(|_|Event::default())));
+                    }
+                }
+            }
+            Err(e)=>{
+                let _=tx.send(Ok(Event::default().json_data(json!({"error":e})).unwrap_or_else(|_|Event::default())));
+            }
+        }
+    });
+    Sse::new(UnboundedReceiverStream::new(rx)).keep_alive(KeepAlive::default())
+}
+
+async fn web_monitor_comfy(
+    AxumJson(body):AxumJson<Value>,
+)->Sse<impl Stream<Item=Result<Event,std::convert::Infallible>>>{
+    let req:Result<MonitorComfyRequest,String>=serde_json::from_value(body.get("req").cloned().unwrap_or(body.clone())).map_err(|e|e.to_string());
+    let (tx,rx)=tokio::sync::mpsc::unbounded_channel::<Result<Event,std::convert::Infallible>>();
+    tokio::spawn(async move{
+        match req{
+            Ok(req)=>{
+                let tx2=tx.clone();
+                let mut emit=|progress:ComfyProgress|{
+                    let event=Event::default().json_data(json!({"progress":progress})).map_err(|e|format!("sse:{}",e))?;
+                    tx2.send(Ok(event)).map_err(|_|"sse client disconnected".to_string())
+                };
+                match monitor_comfy_generation_inner(req,&mut emit).await{
+                    Ok(result)=>{
+                        let _=tx.send(Ok(Event::default().json_data(json!({"result":result,"done":true})).unwrap_or_else(|_|Event::default())));
+                    }
+                    Err(e)=>{
+                        let _=tx.send(Ok(Event::default().json_data(json!({"error":e})).unwrap_or_else(|_|Event::default())));
+                    }
+                }
+            }
+            Err(e)=>{
+                let _=tx.send(Ok(Event::default().json_data(json!({"error":e})).unwrap_or_else(|_|Event::default())));
+            }
+        }
+    });
+    Sse::new(UnboundedReceiverStream::new(rx)).keep_alive(KeepAlive::default())
+}
+
+async fn start_web_host(
+    AxumState(_):AxumState<WebApiState>,
+)->Response{
+    http_error("".into())
 }
 
 fn now_id()->String{SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis().to_string()}
@@ -1137,14 +1282,48 @@ fn path_to_data_url(path:String)->Result<String,String>{
     Ok(format!("data:{};base64,{}",mime,base64::engine::general_purpose::STANDARD.encode(bytes)))
 }
 
+
+#[tauri::command]
+async fn start_web_host(app:AppHandle,state:tauri::State<'_,AppState>,port:Option<u16>)->Result<Value,String>{
+    let mut host=state.web_host.lock().await;
+    if let Some(existing)=host.as_ref(){
+        return Ok(json!({"running":true,"port":existing.port,"localUrl":format!("http://127.0.0.1:{}",existing.port),"lanUrl":existing.lan_url}));
+    }
+
+    let chosen_port=port.unwrap_or(1421);
+    let listener=tokio::net::TcpListener::bind(("0.0.0.0",chosen_port)).await.map_err(|e|format!("LAN host could not bind port {}: {}",chosen_port,e))?;
+    let actual_port=listener.local_addr().map_err(|e|e.to_string())?.port();
+    let dist=dist_directory(&app).ok_or("Could not find dist/index.html. Run npm run build first.")?;
+    let api_state=WebApiState{app:app.clone()};
+    let router=Router::new()
+        .route("/api/{command}",post(web_command))
+        .route("/api/stream_llm",post(web_stream_llm))
+        .route("/api/monitor_comfy_generation",post(web_monitor_comfy))
+        .fallback_service(ServeDir::new(dist))
+        .with_state(api_state);
+    let lan=format!("http://{}:{}",lan_ip(),actual_port);
+    let task=tokio::spawn(async move{
+        let _=axum::serve(listener,router).await;
+    });
+    let url=json!({"running":true,"port":actual_port,"localUrl":format!("http://127.0.0.1:{}",actual_port),"lanUrl":lan});
+    *host=Some(WebHostRuntime{port:actual_port,lan_url:lan,task});
+    Ok(url)
+}
+
+#[tauri::command]
+async fn stop_web_host(state:tauri::State<'_,AppState>)->Result<(),String>{
+    if let Some(runtime)=state.web_host.lock().await.take(){runtime.task.abort();}
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run(){
     tauri::Builder::default()
-        .manage(AppState{active_stream:Arc::new(Mutex::new(false))})
+        .manage(AppState{active_stream:Arc::new(Mutex::new(false)),web_host:Arc::new(Mutex::new(None))})
         .invoke_handler(tauri::generate_handler![
             pick_folder,discover_raphael_config,discover_raphael_roots,scan_library,list_provider_models,
             prepare_generation,stream_llm,parse_prompt_pair,finalize_prompt_pair,build_workflow,inject_prompts,
-            submit_to_comfy,monitor_comfy_generation,load_history,append_history,path_to_data_url
+            submit_to_comfy,monitor_comfy_generation,load_history,append_history,path_to_data_url,start_web_host,stop_web_host
         ])
         .run(tauri::generate_context!())
         .expect("error while running Raphael Prompt Forge");
