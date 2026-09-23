@@ -59,6 +59,8 @@ export interface SelectedLora {
   path: string;
   weight: number;
   activationTags: string[];
+  tags: string[];
+  description?: string;
   character: boolean;
   baseModel?: string;
 }
