@@ -1023,4 +1023,6 @@ function App(){
       </div>
     </aside>
   </div>
+}
+
 export default App;
