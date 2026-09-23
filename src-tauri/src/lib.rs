@@ -546,6 +546,7 @@ async fn stream_inner(app:AppHandle,req:LlmRequest)->Result<(),String>{
             "model":req.settings.model,
             "stream":true,
             "format":"json",
+            "think":false,
             "messages":[
                 {"role":"system","content":req.system_prompt},
                 {"role":"user","content":req.user_prompt}
@@ -618,7 +619,12 @@ fn parse_json(raw:&str)->Result<Value>{
         if a!=usize::MAX && b>=a {clean[a..=b].to_string()} else {String::new()}
     }] {
         if candidate.is_empty(){continue;}
-        if let Ok(v)=serde_json::from_str::<Value>(&candidate){return Ok(v);}
+        if let Ok(v)=serde_json::from_str::<Value>(&candidate){
+            if let Value::String(inner)=&v{
+                if let Ok(parsed)=serde_json::from_str::<Value>(inner){return Ok(parsed);}
+            }
+            return Ok(v);
+        }
     }
     Err(anyhow!("No JSON object in LLM output"))
 }
