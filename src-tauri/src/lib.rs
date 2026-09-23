@@ -810,8 +810,70 @@ fn strip_exact_ci(text:&str, needle:&str)->String{
     out
 }
 
+fn strip_generated_lora_syntax(text:&str)->String{
+    let mut out=text.to_string();
+
+    // Remove common LoRA implementation syntax such as <lora:name:1.0>.
+    loop{
+        let lower=out.to_lowercase();
+        let Some(start)=lower.find("<lora:") else {break;};
+        let Some(rel_end)=out[start..].find('>') else {break;};
+        let end=start+rel_end+1;
+        out.replace_range(start..end,"");
+    }
+
+    // Remove weighted bracket syntax for style/model/LoRA entries, e.g.
+    // [Style - Example@4x0style]1.3
+    let mut cleaned=String::with_capacity(out.len());
+    let mut cursor=0usize;
+    while cursor<out.len(){
+        let remainder=&out[cursor..];
+        let Some(open_rel)=remainder.find('[') else {
+            cleaned.push_str(remainder);
+            break;
+        };
+        let open=cursor+open_rel;
+        cleaned.push_str(&out[cursor..open]);
+        let Some(close_rel)=out[open+1..].find(']') else {
+            cleaned.push_str(&out[open..]);
+            break;
+        };
+        let close=open+1+close_rel;
+        let inner=out[open+1..close].trim();
+        let lower_inner=inner.to_lowercase();
+        let mut end=close+1;
+        let tail=&out[end..];
+        let mut digits=0usize;
+        for ch in tail.chars(){
+            if ch.is_ascii_digit() || ch=='.' || ch=='-' {
+                digits+=ch.len_utf8();
+            } else {
+                break;
+            }
+        }
+        let weighted=digits>0;
+        let implementation_hint=
+            lower_inner.contains("lora") ||
+            lower_inner.contains("style -") ||
+            lower_inner.contains("model -") ||
+            lower_inner.contains("character -") ||
+            lower_inner.contains('@');
+        if weighted && implementation_hint {
+            end+=digits;
+        }else{
+            cleaned.push_str(&out[open..=close]);
+        }
+        cursor=end;
+    }
+
+    cleaned
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn finalize_positive_prompt(raw:&str, loras:&[SelectedLora])->String{
-    let mut positive=raw.trim().trim_matches(',').trim().to_string();
+    let mut positive=strip_generated_lora_syntax(raw).trim().trim_matches(',').trim().to_string();
     let mut triggers=Vec::new();
     for lora in loras {
         for tag in &lora.activation_tags {
@@ -1353,6 +1415,23 @@ pub fn run(){
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finalize_prompt_strips_generated_lora_syntax() {
+        let loras=vec![SelectedLora{
+            id:"x".into(), name:"Style".into(), path:"x".into(), weight:1.0,
+            activation_tags:vec!["style_trigger".into()], tags:vec![],
+            description:None, character:false, base_model:None,
+        }];
+        let result=finalize_positive_prompt(
+            "anime character, [Style - Nekoya@4x0style]1.3, <lora:foo:1.2>, detailed face",
+            &loras,
+        );
+        assert!(!result.contains("[Style - Nekoya@4x0style]1.3"));
+        assert!(!result.contains("<lora:foo:1.2>"));
+        assert!(result.contains("style_trigger"));
+        assert!(result.contains("detailed face"));
+    }
 
     #[test]
     fn inject_request_accepts_frontend_camel_case_payload() {
