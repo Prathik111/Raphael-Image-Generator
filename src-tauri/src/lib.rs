@@ -53,7 +53,18 @@ struct PickResult { path: Option<String> }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct LlmSettings { provider: String, base_url: String, api_key: String, model: String, temperature: f32, max_tokens: u32 }
+struct LlmSettings {
+    provider: String,
+    base_url: String,
+    api_key: String,
+    model: String,
+    temperature: f32,
+    max_tokens: u32,
+    #[serde(default = "default_context_tokens")]
+    context_tokens: u32,
+}
+
+fn default_context_tokens() -> u32 { 16384 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -641,7 +652,11 @@ where F:FnMut(LlmDelta)->Result<(),String> + Send
                 {"role":"system","content":req.system_prompt},
                 {"role":"user","content":req.user_prompt}
             ],
-            "options":{"temperature":req.settings.temperature,"num_predict":req.settings.max_tokens}
+            "options":{
+                "temperature":req.settings.temperature,
+                "num_predict":req.settings.max_tokens,
+                "num_ctx":req.settings.context_tokens
+            }
         }),true)
     }else{
         (if base.ends_with("/v1"){format!("{}/chat/completions",base)}else{format!("{}/v1/chat/completions",base)},json!({
