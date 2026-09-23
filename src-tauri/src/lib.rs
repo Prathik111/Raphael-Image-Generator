@@ -1140,56 +1140,60 @@ async fn web_command(
     AxumPath(command):AxumPath<String>,
     AxumJson(body):AxumJson<Value>,
 )->Response{
+    if command=="stream_llm" {
+        return web_stream_llm(AxumJson(body)).await.into_response();
+    }
+    if command=="monitor_comfy_generation" {
+        return web_monitor_comfy(AxumJson(body)).await.into_response();
+    }
+
     let req_value=body.get("req").cloned().unwrap_or_else(||body.clone());
     let result:Result<Value,String>=match command.as_str(){
-        "discover_raphael_config"=>Ok(serde_json::to_value(discover_raphael_config()).unwrap()),
-        "discover_raphael_roots"=>Ok(serde_json::to_value(discover_raphael_roots()).unwrap()),
+        "discover_raphael_config"=>serde_json::to_value(discover_raphael_config()).map_err(|e|e.to_string()),
+        "discover_raphael_roots"=>serde_json::to_value(discover_raphael_roots()).map_err(|e|e.to_string()),
         "list_provider_models"=>{
-            serde_json::from_value::<LlmSettings>(req_value).map_err(|e|e.to_string())
-                .and_then(|x|async move{list_provider_models(x).await}.await)
-                .and_then(|x|serde_json::to_value(x).map_err(|e|e.to_string()))
+            let settings=serde_json::from_value::<LlmSettings>(req_value).map_err(|e|e.to_string())?;
+            let models=list_provider_models(settings).await?;
+            serde_json::to_value(models).map_err(|e|e.to_string())
         }
         "scan_library"=>{
-            serde_json::from_value::<ScanRequest>(req_value).map_err(|e|e.to_string())
-                .and_then(|x|scan_library(x))
-                .and_then(|x|serde_json::to_value(x).map_err(|e|e.to_string()))
+            let request=serde_json::from_value::<ScanRequest>(req_value).map_err(|e|e.to_string())?;
+            serde_json::to_value(scan_library(request)?).map_err(|e|e.to_string())
         }
         "prepare_generation"=>{
-            serde_json::from_value::<PrepareRequest>(req_value).map_err(|e|e.to_string())
-                .and_then(|x|prepare_generation(x))
-                .and_then(|x|serde_json::to_value(x).map_err(|e|e.to_string()))
+            let request=serde_json::from_value::<PrepareRequest>(req_value).map_err(|e|e.to_string())?;
+            serde_json::to_value(prepare_generation(request)?).map_err(|e|e.to_string())
         }
-        "parse_prompt_pair"=>req_value.as_str().ok_or_else(||"raw prompt text is required".into())
-            .and_then(parse_prompt_pair)
-            .and_then(|x|serde_json::to_value(x).map_err(|e|e.to_string())),
+        "parse_prompt_pair"=>{
+            let raw=req_value.as_str().ok_or_else(||"raw prompt text is required".to_string())?;
+            serde_json::to_value(parse_prompt_pair(raw)?).map_err(|e|e.to_string())
+        }
         "finalize_prompt_pair"=>{
-            serde_json::from_value::<FinalizePromptRequest>(req_value).map_err(|e|e.to_string())
-                .and_then(|x|finalize_prompt_pair(x))
-                .and_then(|x|serde_json::to_value(x).map_err(|e|e.to_string()))
+            let request=serde_json::from_value::<FinalizePromptRequest>(req_value).map_err(|e|e.to_string())?;
+            serde_json::to_value(finalize_prompt_pair(request)?).map_err(|e|e.to_string())
         }
         "build_workflow"=>{
-            serde_json::from_value::<WorkflowRequest>(req_value).map_err(|e|e.to_string())
-                .and_then(|x|build_workflow(x))
-                .and_then(|x|serde_json::to_value(x).map_err(|e|e.to_string()))
+            let request=serde_json::from_value::<WorkflowRequest>(req_value).map_err(|e|e.to_string())?;
+            serde_json::to_value(build_workflow(request)?).map_err(|e|e.to_string())
         }
         "inject_prompts"=>{
-            serde_json::from_value::<InjectRequest>(req_value).map_err(|e|e.to_string())
-                .and_then(|x|inject_prompts(x))
-                .and_then(|x|serde_json::to_value(x).map_err(|e|e.to_string()))
+            let request=serde_json::from_value::<InjectRequest>(req_value).map_err(|e|e.to_string())?;
+            serde_json::to_value(inject_prompts(request)?).map_err(|e|e.to_string())
         }
         "submit_to_comfy"=>{
-            serde_json::from_value::<SubmitRequest>(req_value).map_err(|e|e.to_string())
-                .and_then(|x|async move{submit_to_comfy(x).await}.await)
-                .and_then(|x|serde_json::to_value(x).map_err(|e|e.to_string()))
+            let request=serde_json::from_value::<SubmitRequest>(req_value).map_err(|e|e.to_string())?;
+            serde_json::to_value(submit_to_comfy(request).await?).map_err(|e|e.to_string())
         }
-        "load_history"=>load_history(state.app.clone()).and_then(|x|serde_json::to_value(x).map_err(|e|e.to_string())),
+        "load_history"=>serde_json::to_value(load_history(state.app.clone())?).map_err(|e|e.to_string()),
         "append_history"=>{
             let payload=body.get("payload").cloned().unwrap_or(Value::Null);
-            append_history(state.app.clone(),payload).and_then(|x|serde_json::to_value(x).map_err(|e|e.to_string()))
+            serde_json::to_value(append_history(state.app.clone(),payload)?).map_err(|e|e.to_string())
         }
         "path_to_data_url"=>{
-            let path=req_value.get("path").and_then(|x|x.as_str()).or_else(||req_value.as_str()).ok_or_else(||"path is required".to_string())?;
-            path_to_data_url(path.to_string()).and_then(|x|serde_json::to_value(x).map_err(|e|e.to_string()))
+            let path=req_value.get("path").and_then(|x|x.as_str())
+                .or_else(||req_value.as_str())
+                .ok_or_else(||"path is required".to_string())?;
+            serde_json::to_value(path_to_data_url(path.to_string())?).map_err(|e|e.to_string())
         }
         _=>Err(format!("Unknown API command: {}",command))
     };
@@ -1256,12 +1260,6 @@ async fn web_monitor_comfy(
     Sse::new(UnboundedReceiverStream::new(rx)).keep_alive(KeepAlive::default())
 }
 
-async fn start_web_host(
-    AxumState(_):AxumState<WebApiState>,
-)->Response{
-    http_error("".into())
-}
-
 fn now_id()->String{SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis().to_string()}
 fn history_path(app:&AppHandle)->Result<PathBuf,String>{let dir=app.path().app_data_dir().map_err(|e|e.to_string())?;fs::create_dir_all(&dir).map_err(|e|e.to_string())?;Ok(dir.join("generation-history.json"))}
 
@@ -1297,8 +1295,6 @@ async fn start_web_host(app:AppHandle,state:tauri::State<'_,AppState>,port:Optio
     let api_state=WebApiState{app:app.clone()};
     let router=Router::new()
         .route("/api/{command}",post(web_command))
-        .route("/api/stream_llm",post(web_stream_llm))
-        .route("/api/monitor_comfy_generation",post(web_monitor_comfy))
         .fallback_service(ServeDir::new(dist))
         .with_state(api_state);
     let lan=format!("http://{}:{}",lan_ip(),actual_port);
