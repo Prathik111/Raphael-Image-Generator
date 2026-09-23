@@ -1034,6 +1034,9 @@ async fn monitor_comfy_generation(
     let client=reqwest::Client::new();
     let mut socket=connect_async(ws_url).await.ok().map(|(_,stream)| stream);
     let started=Instant::now();
+    let mut last_percent=0.0f32;
+    let mut last_current=0u32;
+    let mut last_total=0u32;
 
     let _=on_event.send(ComfyProgress{
         percent:0.0,current:0,total:1,node:None,status:"waiting".into()
@@ -1069,10 +1072,13 @@ async fn monitor_comfy_generation(
                                 "progress"=>{
                                     let current=data.get("value").and_then(|x|x.as_u64()).unwrap_or(0) as u32;
                                     let total=data.get("max").and_then(|x|x.as_u64()).unwrap_or(1) as u32;
-                                    let percent=if total>0 {current as f32*100.0/total as f32}else{0.0};
+                                    let percent=if total>0 {current as f32*100.0/total as f32}else{last_percent};
+                                    last_percent=percent.clamp(0.0,100.0);
+                                    last_current=current;
+                                    last_total=total;
                                     let _=on_event.send(ComfyProgress{
-                                        percent:percent.clamp(0.0,100.0),
-                                        current,total,
+                                        percent:last_percent,
+                                        current:last_current,total:last_total,
                                         node:data.get("node").and_then(|x|x.as_str()).map(str::to_string),
                                         status:"sampling".into(),
                                     });
@@ -1080,7 +1086,11 @@ async fn monitor_comfy_generation(
                                 "executing"=>{
                                     let node=data.get("node").and_then(|x|x.as_str()).map(str::to_string);
                                     let _=on_event.send(ComfyProgress{
-                                        percent:0.0,current:0,total:0,node,status:if node.is_some(){"running".into()}else{"finishing".into()},
+                                        percent:last_percent,
+                                        current:last_current,
+                                        total:last_total,
+                                        node,
+                                        status:if node.is_some(){"running".into()}else{"finishing".into()},
                                     });
                                 }
                                 "execution_error"=>{
