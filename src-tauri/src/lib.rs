@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{fs, path::{Path, PathBuf}, sync::Arc, time::{SystemTime, UNIX_EPOCH}};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Manager};
+use tauri::ipc::Channel;
 use tokio::sync::Mutex;
 use walkdir::WalkDir;
 
@@ -76,6 +77,10 @@ struct PromptPair { positive_prompt: String, negative_prompt: String, rationale:
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct LlmRequest { settings: LlmSettings, system_prompt: String, user_prompt: String }
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LlmDelta { text: String }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -550,12 +555,22 @@ fn prepare_generation(req:PrepareRequest)->Result<PreparedGeneration,String>{
 }
 
 #[tauri::command]
-async fn stream_llm(app:AppHandle,state:tauri::State<'_,AppState>,req:LlmRequest)->Result<(),String>{
-    {let mut busy=state.active_stream.lock().await;if *busy{return Err("An LLM stream is already active.".into())}*busy=true;}
-    let result=stream_inner(app.clone(),req).await; *state.active_stream.lock().await=false; result
+async fn stream_llm(
+    state:tauri::State<'_,AppState>,
+    req:LlmRequest,
+    on_event:Channel<LlmDelta>,
+)->Result<(),String>{
+    {
+        let mut busy=state.active_stream.lock().await;
+        if *busy{return Err("An LLM stream is already active.".into())}
+        *busy=true;
+    }
+    let result=stream_inner(req,on_event).await;
+    *state.active_stream.lock().await=false;
+    result
 }
 
-async fn stream_inner(app:AppHandle,req:LlmRequest)->Result<(),String>{
+async fn stream_inner(req:LlmRequest,on_event:Channel<LlmDelta>)->Result<(),String>{
     let client=reqwest::Client::new();
     let base=base_url(&req.settings.base_url);
     let (url,mut body,ollama)=if req.settings.provider=="ollama"{
@@ -604,25 +619,60 @@ async fn stream_inner(app:AppHandle,req:LlmRequest)->Result<(),String>{
 
     let mut stream=response.bytes_stream();
     let mut buffer=String::new();
+
     while let Some(chunk)=stream.next().await{
         buffer.push_str(&String::from_utf8_lossy(&chunk.map_err(|e|e.to_string())?));
         while let Some(pos)=buffer.find('\n'){
             let line=buffer[..pos].trim_end_matches('\r').to_string();
             buffer=buffer[pos+1..].to_string();
             if line.trim().is_empty(){continue}
-            let data=if ollama{line.as_str()}else{line.strip_prefix("data: ").unwrap_or("")};
+
+            let data=if ollama{
+                line.trim()
+            }else{
+                line.strip_prefix("data: ").unwrap_or("").trim()
+            };
+
             if data.is_empty()||data=="[DONE]"{continue}
+
             let v:Value=match serde_json::from_str(data){Ok(x)=>x,Err(_)=>continue};
             let token=if ollama{
                 v.get("message").and_then(|x|x.get("content")).and_then(|x|x.as_str()).unwrap_or("")
             }else{
-                v.get("choices").and_then(|x|x.get(0)).and_then(|x|x.get("delta")).and_then(|x|x.get("content")).and_then(|x|x.as_str()).unwrap_or("")
+                v.get("choices")
+                    .and_then(|x|x.get(0))
+                    .and_then(|x|x.get("delta"))
+                    .and_then(|x|x.get("content"))
+                    .and_then(|x|x.as_str())
+                    .unwrap_or("")
             };
-            if !token.is_empty(){let _=app.emit("llm:delta",json!({"text":token}));}
+
+            if !token.is_empty(){
+                on_event.send(LlmDelta{text:token.to_string()})
+                    .map_err(|e|format!("LLM stream channel closed: {}",e))?;
+            }
         }
     }
 
-    let _=app.emit("llm:done",json!({"ok":true}));
+    // Handle a final unterminated line from providers that close without a trailing newline.
+    let tail=buffer.trim();
+    if !tail.is_empty() && tail!="[DONE]"{
+        let data=if ollama{tail}else{tail.strip_prefix("data: ").unwrap_or(tail).trim()};
+        if !data.is_empty(){
+            if let Ok(v)=serde_json::from_str::<Value>(data){
+                let token=if ollama{
+                    v.get("message").and_then(|x|x.get("content")).and_then(|x|x.as_str()).unwrap_or("")
+                }else{
+                    v.get("choices").and_then(|x|x.get(0)).and_then(|x|x.get("delta")).and_then(|x|x.get("content")).and_then(|x|x.as_str()).unwrap_or("")
+                };
+                if !token.is_empty(){
+                    on_event.send(LlmDelta{text:token.to_string()})
+                        .map_err(|e|format!("LLM stream channel closed: {}",e))?;
+                }
+            }
+        }
+    }
+
     Ok(())
 }
 
