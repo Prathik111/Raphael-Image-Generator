@@ -43,7 +43,8 @@ struct LlmSettings { provider: String, base_url: String, api_key: String, model:
 #[serde(rename_all = "camelCase")]
 struct SelectedLora {
     id: String, name: String, path: String, weight: f32,
-    activation_tags: Vec<String>, character: bool, base_model: Option<String>,
+    activation_tags: Vec<String>, tags: Vec<String>, description: Option<String>,
+    character: bool, base_model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -85,7 +86,20 @@ struct WorkflowRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct InjectRequest { workflow: Value, positive_prompt: String, negative_prompt: String }
+struct InjectRequest {
+    workflow: Value,
+    #[serde(rename = "positivePrompt")]
+    positive_prompt: String,
+    #[serde(rename = "negativePrompt")]
+    negative_prompt: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FinalizePromptRequest {
+    prompt_pair: PromptPair,
+    loras: Vec<SelectedLora>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -517,7 +531,9 @@ fn prepare_generation(req:PrepareRequest)->Result<PreparedGeneration,String>{
     let loras=chosen.into_iter().map(|l|SelectedLora{
         id:l.id.clone(),name:l.name.clone(),path:l.path.clone(),
         weight:rand::rng().random_range(0.65..=1.0),
-        activation_tags:if l.activation_tags.is_empty(){l.tags.clone()}else{l.activation_tags.clone()},
+        activation_tags:l.activation_tags.clone(),
+        tags:l.tags.clone(),
+        description:l.cache_description.clone(),
         character:l.character||l.tags.iter().any(|t|norm(t)=="character"),
         base_model:l.base_model.clone()
     }).collect();
@@ -677,6 +693,54 @@ fn parse_prompt_pair(raw:String)->Result<PromptPair,String>{
     }
 }
 
+fn strip_exact_ci(text:&str, needle:&str)->String{
+    if needle.trim().is_empty(){return text.to_string();}
+    let lower=text.to_lowercase();
+    let needle_lower=needle.to_lowercase();
+    let mut out=String::with_capacity(text.len());
+    let mut cursor=0usize;
+    while let Some(rel)=lower[cursor..].find(&needle_lower){
+        let start=cursor+rel;
+        out.push_str(&text[cursor..start]);
+        cursor=start+needle.len();
+    }
+    out.push_str(&text[cursor..]);
+    out
+}
+
+fn finalize_positive_prompt(raw:&str, loras:&[SelectedLora])->String{
+    let mut positive=raw.trim().trim_matches(',').trim().to_string();
+    let mut triggers=Vec::new();
+    for lora in loras {
+        for tag in &lora.activation_tags {
+            let tag=tag.trim();
+            if tag.is_empty(){continue;}
+            positive=strip_exact_ci(&positive,tag);
+            if !triggers.iter().any(|x:String|x.eq_ignore_ascii_case(tag)){
+                triggers.push(tag.to_string());
+            }
+        }
+    }
+    positive=positive
+        .split(',')
+        .map(str::trim)
+        .filter(|x|!x.is_empty())
+        .collect::<Vec<_>>()
+        .join(", ");
+    if triggers.is_empty(){return positive;}
+    if positive.is_empty(){return triggers.join(", ");}
+    format!("{}, {}",positive,triggers.join(", "))
+}
+
+#[tauri::command]
+fn finalize_prompt_pair(req:FinalizePromptRequest)->Result<PromptPair,String>{
+    Ok(PromptPair{
+        positive_prompt:finalize_positive_prompt(&req.prompt_pair.positive_prompt,&req.loras),
+        negative_prompt:req.prompt_pair.negative_prompt.trim().to_string(),
+        rationale:req.prompt_pair.rationale.clone(),
+    })
+}
+
 #[tauri::command]
 fn build_workflow(req:WorkflowRequest)->Result<Value,String>{
     let mut map=serde_json::Map::new();
@@ -737,7 +801,7 @@ pub fn run(){
         .manage(AppState{active_stream:Arc::new(Mutex::new(false))})
         .invoke_handler(tauri::generate_handler![
             pick_folder,discover_raphael_config,discover_raphael_roots,scan_library,list_provider_models,
-            prepare_generation,stream_llm,parse_prompt_pair,build_workflow,inject_prompts,
+            prepare_generation,stream_llm,parse_prompt_pair,finalize_prompt_pair,build_workflow,inject_prompts,
             submit_to_comfy,load_history,append_history,path_to_data_url
         ])
         .run(tauri::generate_context!())
