@@ -351,25 +351,6 @@ function App(){
     setConstraints(x=>({...x,[key]:value}));
   }
 
-  function openGenerationSettings(){
-    setGenerationDraft({
-      llm:{...llm},
-      systemPrompt,
-      demographic,
-      demographicPrompts:{...demographicPrompts},
-      maxLoras,
-      randomLoraMin:constraints.randomLoraMin,
-      randomLoraMax:Math.min(maxLoras,constraints.randomLoraMax),
-      constraints:{...constraints},
-      width,
-      height,
-      steps,
-      cfg,
-      sampler,
-    });
-    setSettingsOpen(true);
-  }
-
   function saveGenerationSettings(){
     const draft=generationDraft;
     const cappedMax=Math.max(1,Math.min(16,draft.maxLoras));
@@ -683,7 +664,7 @@ function App(){
     }
   }
 
-  const selectedHistory=history.find(item=>item.id===selectedHistoryId) || history[0];
+  const selectedHistory=selectedHistoryId ? history.find(item=>item.id===selectedHistoryId) : undefined;
 
   return <div className="app-shell">
     <iframe className="raphael-bg" src="/raphael-background.html" title="Raphael background" aria-hidden="true"/>
