@@ -216,35 +216,49 @@ function App() {
         setStream(chunks.join(''));
       });
 
-      const activation = prep.loras.map(l =>
-        l.name + ' [weight ' + l.weight.toFixed(2) + '] [' + l.activationTags.join(', ') + ']'
-      ).join('\n');
+      const loraMetadata = prep.loras.map((l, index) =>
+        'LORA ' + (index + 1) + '\n' +
+        'NAME: ' + l.name + '\n' +
+        'TYPE: ' + (l.character ? 'CHARACTER IDENTITY' : 'SUPPORTING CONCEPT') + '\n' +
+        'BASE MODEL: ' + (l.baseModel || 'unknown') + '\n' +
+        'TAGS: ' + (l.tags.length ? l.tags.join(', ') : '(none)') + '\n' +
+        'DESCRIPTION: ' + (l.description || '(none)')
+      ).join('\n\n');
 
       const systemPrompt =
-        'You are a deterministic Stable Diffusion prompt engine. ' +
-        'Only the provided character LoRA may determine character identity. Never invent a character. ' +
-        'Preserve the selected LoRA activation tags. Never emit <lora:...> syntax. ' +
+        'You are a Stable Diffusion prompt planner. ' +
+        'Understand the purpose of every selected LoRA from its name, type, tags and description before writing the prompt. ' +
+        'Use each LoRA only for concepts it plausibly provides. ' +
+        'The character LoRA is the sole authority for character identity, appearance and named-character traits. ' +
+        'Supporting LoRAs can contribute only their documented visual concept/style/content. ' +
+        'Do not invent character identities or unsupported LoRA effects. ' +
+        'Do NOT output LoRA activation/trigger words, angle-bracket LoRA syntax, weights, or implementation details in the positive prompt. ' +
+        'The application will deterministically append activation triggers after you finish. ' +
         'Return JSON only with positive_prompt, negative_prompt, rationale.';
 
       const userPrompt =
         'CHECKPOINT: ' + prep.checkpoint.name + '\n' +
         'BASE: ' + (prep.checkpoint.baseModel || 'unknown') + '\n' +
-        'COMPATIBILITY: ' + prep.compatibilityKeys.join(', ') + '\n' +
-        'LORA STACK:\n' + activation + '\n' +
+        'COMPATIBILITY: ' + prep.compatibilityKeys.join(', ') + '\n\n' +
+        'SELECTED LoRAs AND THEIR DOCUMENTED PURPOSE METADATA:\n' + loraMetadata + '\n\n' +
+        'SCENE:\n' +
         'CHARACTER: ' + prep.scene.character + '\n' +
         'SETTING: ' + prep.scene.setting + '\n' +
         'POSE: ' + prep.scene.pose + '\n' +
         'EXPRESSION: ' + prep.scene.expression + '\n' +
         'DRESS: ' + prep.scene.dress + '\n' +
         'COMPOSITION: ' + prep.scene.composition + '\n' +
-        'EXTRA: ' + (constraints.additional || '(none)') + '\n' +
-        'Build a complete positive prompt and a robust negative prompt.';
+        'EXTRA: ' + (constraints.additional || '(none)') + '\n\n' +
+        'Write a complete, coherent positive prompt that uses the selected LoRAs according to their documented purposes, plus a robust negative prompt.';
 
       await invoke('stream_llm', {req:{
         settings:llm, systemPrompt, userPrompt,
       }});
 
-      const pair = await invoke<PromptPair>('parse_prompt_pair', {raw:chunks.join('')});
+      const rawPair = await invoke<PromptPair>('parse_prompt_pair', {raw:chunks.join('')});
+      const pair = await invoke<PromptPair>('finalize_prompt_pair', {
+        req:{promptPair:rawPair, loras:prep.loras},
+      });
       setPrompts(pair);
       setStageStatus('llm','done');
       unlisten.current?.();
