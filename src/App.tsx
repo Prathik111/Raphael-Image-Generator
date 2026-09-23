@@ -24,7 +24,10 @@ const emptyConstraints: Constraints = {
 };
 
 const defaultSystemPrompt =
-  'You are a Stable Diffusion prompt planner. Understand the purpose of every selected LoRA from its name, type, tags and description before writing the prompt. Use each LoRA only for concepts it plausibly provides. The character LoRA is the sole authority for character identity, appearance and named-character traits. Supporting LoRAs can contribute only their documented visual concept, style or content. Do not invent unsupported LoRA effects. Do not output LoRA activation words, angle-bracket LoRA syntax, weights, or implementation details. The application will append activation triggers deterministically. Return JSON only with positive_prompt, negative_prompt, rationale.';
+  'You are an expert Stable Diffusion prompt director and scene planner. Build the image prompt from the requested scene, not merely from LoRA metadata. Treat LoRAs as supporting visual tools, never as the source of the entire scene. The character LoRA is the sole authority for character identity, face, body identity and named-character traits. Supporting LoRAs may contribute only their documented concept, costume element, visual motif, style or other explicitly documented effect. Do not invent unsupported LoRA effects and do not let a LoRA replace explicit scene direction. ' +
+  'You must explicitly decide and describe the subject state, action or activity, body pose, hand/arm placement, head direction, gaze, facial expression, emotional state, interaction with nearby objects, clothing/dress, setting, background/environment, time of day, weather or atmosphere when relevant, camera viewpoint, framing, shot type, perspective, depth, spatial arrangement, lighting direction and quality, color/mood, material/texture details, and important foreground/background elements. ' +
+  'Do not rely on generic LoRA activation text to describe expression, state, pose, background or composition; those must be written as normal prompt language. Preserve requested scene constraints exactly when possible. Resolve conflicts by prioritizing explicit user scene constraints, then character identity, then compatible LoRA concepts. Keep the positive prompt coherent and ordered from subject/identity to action/state, appearance, pose/expression, clothing, environment/background, composition/camera, lighting and finishing details. Make the negative prompt targeted to the requested scene and common image-generation failures rather than adding random unrelated concepts. ' +
+  'Never output LoRA activation words, angle-bracket LoRA syntax, weights, implementation details or JSON commentary outside the required object. Return JSON only with positive_prompt, negative_prompt, rationale.';
 
 const defaultDemographicPrompts: DemographicPrompts = {
   safe:'Keep all generated content non-sexual, non-explicit and suitable for general audiences. Avoid nudity and sexualized framing.',
@@ -173,8 +176,9 @@ function App(){
     baseUrl:'http://127.0.0.1:11434',
     apiKey:'',
     model:'',
-    temperature:0.75,
-    maxTokens:1200,
+    temperature:0.72,
+    maxTokens:4096,
+    contextTokens:16384,
   });
   const [models,setModels]=useState<string[]>([]);
   const [library,setLibrary]=useState<LibrarySnapshot|null>(null);
@@ -210,6 +214,7 @@ function App(){
   const [toast,setToast]=useState('');
   const [thumbs,setThumbs]=useState<Record<string,string>>({});
   const [selectedLoraIds,setSelectedLoraIds]=useState<string[]>([]);
+  const [manualLoraIds,setManualLoraIds]=useState<string[]>([]);
 
   const [settingsOpen,setSettingsOpen]=useState(false);
   const [generationDraft,setGenerationDraft]=useState({
@@ -257,8 +262,8 @@ function App(){
   );
 
   const manualLoras=useMemo(
-    ()=>compatibleLoras.filter(lora=>selectedLoraIds.includes(lora.id)),
-    [compatibleLoras,selectedLoraIds],
+    ()=>compatibleLoras.filter(lora=>manualLoraIds.includes(lora.id)),
+    [compatibleLoras,manualLoraIds],
   );
 
   const filteredCheckpoints=useMemo(()=>{
@@ -339,6 +344,7 @@ function App(){
       if(!selectedId && snap.checkpoints[0]) setSelectedId(snap.checkpoints[0].id);
       const ids=new Set(snap.loras.map(x=>x.id));
       setSelectedLoraIds(current=>current.filter(id=>ids.has(id)));
+      setManualLoraIds(current=>current.filter(id=>ids.has(id)));
       setStageStatus('library','done');
       setToast(snap.checkpoints.length + ' checkpoints · ' + snap.loras.length + ' LoRAs');
     }catch(e){
@@ -381,19 +387,26 @@ function App(){
       return null;
     }
     setError('');
-    const manualIds=selectedLoraIds.filter(id=>compatibleLoras.some(lora=>lora.id===id));
+
+    const manualIds=manualLoraIds.filter(id=>compatibleLoras.some(lora=>lora.id===id));
     const minCount=Math.max(1,Math.min(maxLoras,constraints.randomLoraMin));
     const maxCount=Math.max(minCount,Math.min(maxLoras,constraints.randomLoraMax));
-    const targetCount=Math.floor(Math.random()*(maxCount-minCount+1))+minCount;
-    const pool=compatibleLoras
+    const randomTarget=Math.floor(Math.random()*(maxCount-minCount+1))+minCount;
+    const targetCount=Math.max(manualIds.length,randomTarget);
+    const availablePool=compatibleLoras
       .filter(lora=>!manualIds.includes(lora.id))
       .sort(()=>Math.random()-0.5);
-    const additions=Math.max(0,targetCount-manualIds.length);
-    const combinedIds=[...manualIds,...pool.slice(0,additions).map(lora=>lora.id)];
+
+    const randomSlots=Math.max(0,Math.min(maxLoras,targetCount)-manualIds.length);
+    const randomIds=availablePool.slice(0,randomSlots).map(lora=>lora.id);
+    const combinedIds=[...manualIds,...randomIds];
 
     setSelectedLoraIds(combinedIds);
+    setPrepared(null);
+    setPrompts(null);
     setStage('compatibility');
     setStageStatus('compatibility','running');
+
     try{
       const result=await apiInvoke<PreparedGeneration>('prepare_generation',{
         req:{
@@ -418,9 +431,14 @@ function App(){
   }
 
   function toggleLora(id:string){
-    setSelectedLoraIds(current=>current.includes(id)
-      ? current.filter(x=>x!==id)
-      : [...current,id]);
+    setManualLoraIds(current=>{
+      const next=current.includes(id) ? current.filter(x=>x!==id) : [...current,id];
+      setSelectedLoraIds(selected=>{
+        const withoutId=selected.filter(x=>x!==id && compatibleLoras.some(lora=>lora.id===x));
+        return next.includes(id) ? [...withoutId,id] : withoutId;
+      });
+      return next;
+    });
     setPrepared(null);
     setPrompts(null);
   }
@@ -957,7 +975,8 @@ function App(){
                 }catch(e){setError(String(e));}
               })()}><RefreshCw size={13}/> GET MODELS</button>
               <label className="wide-field"><span>TEMPERATURE · {generationDraft.llm.temperature.toFixed(2)}</span><input type="range" min={0} max={2} step={0.05} value={generationDraft.llm.temperature} onChange={e=>setGenerationDraft(d=>({...d,llm:{...d.llm,temperature:Number(e.target.value)}}))}/></label>
-              <label className="wide-field"><span>MAX TOKENS</span><input type="number" min={128} max={16384} value={generationDraft.llm.maxTokens} onChange={e=>setGenerationDraft(d=>({...d,llm:{...d.llm,maxTokens:Math.max(128,Number(e.target.value))}}))}/></label>
+              <label className="wide-field"><span>MAX TOKENS</span><input type="number" min={128} max={16384} value={generationDraft.llm.maxTokens} onChange={e=>setGenerationDraft(d=>({...d,llm:{...d.llm,maxTokens:Math.max(128,Number(e.target.value))}}))}/>
+              <label className="wide-field"><span>CONTEXT TOKENS</span><input type="number" min={2048} max={131072} step={1024} value={generationDraft.llm.contextTokens} onChange={e=>setGenerationDraft(d=>({...d,llm:{...d.llm,contextTokens:Math.max(2048,Number(e.target.value))}}))}/></label>
             </div>
           </section>
 
