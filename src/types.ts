@@ -88,6 +88,10 @@ export interface GenerationRecord {
   scene: SceneSelection;
   positivePrompt: string;
   negativePrompt: string;
+  rationale?: string;
+  generationSettings?: GenerationSettings;
+  imageDataUrl?: string;
+  imageFilename?: string;
   workflow: unknown;
   comfyPromptId?: string;
 }
