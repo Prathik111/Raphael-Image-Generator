@@ -993,8 +993,10 @@ mod tests {
             loras,
         }).expect("finalize_prompt_pair must succeed");
 
-        assert!(!finalized.positive_prompt.contains("triggerA"));
-        assert!(finalized.positive_prompt.ends_with("triggerA, char_tag, style_tag"));
+        assert_eq!(
+            finalized.positive_prompt,
+            "portrait, blue eyes, serene expression, triggerA, char_tag, style_tag"
+        );
         assert_eq!(finalized.negative_prompt, "blurry");
     }
 }
