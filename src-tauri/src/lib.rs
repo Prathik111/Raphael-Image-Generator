@@ -62,6 +62,7 @@ struct PreparedGeneration {
 #[serde(rename_all = "camelCase")]
 struct PrepareRequest {
     checkpoint: ModelInfo, loras: Vec<ModelInfo>,
+    #[serde(default)] selected_lora_ids: Vec<String>,
     setting: String, pose: String, expression: String, character: String,
     dress: String, composition: String, additional: String,
     random_lora_min: u32, random_lora_max: u32,
@@ -468,14 +469,59 @@ fn prepare_generation(req:PrepareRequest)->Result<PreparedGeneration,String>{
         explicit||tagged
     }).collect();
     if compatible.is_empty(){return Err("No compatible LoRAs were found for the selected checkpoint.".into());}
+
+    let manual:Vec<&ModelInfo>=if req.selected_lora_ids.is_empty(){
+        Vec::new()
+    }else{
+        let picked:Vec<&ModelInfo>=req.selected_lora_ids.iter()
+            .filter_map(|id|compatible.iter().copied().find(|l|&l.id==id))
+            .collect();
+        if picked.len()!=req.selected_lora_ids.len(){
+            return Err("One or more manually selected LoRAs are no longer compatible with this checkpoint.".into());
+        }
+        picked
+    };
+
     let chars:Vec<&ModelInfo>=compatible.iter().copied().filter(|l|l.character||l.tags.iter().any(|t|norm(t)=="character")).collect();
     if chars.is_empty(){return Err("No compatible character LoRA was found. Character identity is restricted to LoRAs marked with the character tag.".into());}
+
     let wanted=req.character.trim().to_lowercase();
-    let character=if wanted.is_empty(){*chars.choose(&mut rand::rng()).unwrap()}else{*chars.iter().find(|l|l.name.to_lowercase().contains(&wanted)||l.tags.iter().any(|t|t.to_lowercase().contains(&wanted))).ok_or("Requested character does not match a compatible character LoRA.")?};
-    let count=rand::rng().random_range(req.random_lora_min.max(1)..=req.random_lora_max.max(req.random_lora_min.max(1))) as usize;
-    let mut pool:Vec<&ModelInfo>=compatible.into_iter().filter(|x|x.id!=character.id).collect(); pool.shuffle(&mut rand::rng());
-    let mut chosen=vec![character]; chosen.extend(pool.into_iter().take(count.saturating_sub(1)));
-    let loras=chosen.into_iter().map(|l|SelectedLora{id:l.id.clone(),name:l.name.clone(),path:l.path.clone(),weight:rand::rng().random_range(0.65..=1.0),activation_tags:if l.activation_tags.is_empty(){l.tags.clone()}else{l.activation_tags.clone()},character:l.character||l.tags.iter().any(|t|norm(t)=="character"),base_model:l.base_model.clone()}).collect();
+    let manual_character=manual.iter().copied().find(|l|l.character||l.tags.iter().any(|t|norm(t)=="character"));
+    if !wanted.is_empty() && manual_character.is_some() &&
+        !manual_character.unwrap().name.to_lowercase().contains(&wanted) &&
+        !manual_character.unwrap().tags.iter().any(|t|t.to_lowercase().contains(&wanted)) {
+        return Err("The selected character LoRA does not match the requested character.".into());
+    }
+
+    let character=if !wanted.is_empty(){
+        *chars.iter().find(|l|l.name.to_lowercase().contains(&wanted)||l.tags.iter().any(|t|t.to_lowercase().contains(&wanted))).ok_or("Requested character does not match a compatible character LoRA.")?
+    }else if let Some(l)=manual_character{
+        l
+    }else{
+        *chars.choose(&mut rand::rng()).unwrap()
+    };
+
+    let chosen:Vec<&ModelInfo>=if !manual.is_empty(){
+        let mut picked=manual.clone();
+        if !picked.iter().any(|l|l.id==character.id){picked.insert(0,character);}
+        picked
+    }else{
+        let count=rand::rng().random_range(req.random_lora_min.max(1)..=req.random_lora_max.max(req.random_lora_min.max(1))) as usize;
+        let mut pool:Vec<&ModelInfo>=compatible.into_iter().filter(|x|x.id!=character.id).collect();
+        pool.shuffle(&mut rand::rng());
+        let mut picked=vec![character];
+        picked.extend(pool.into_iter().take(count.saturating_sub(1)));
+        picked
+    };
+
+    let loras=chosen.into_iter().map(|l|SelectedLora{
+        id:l.id.clone(),name:l.name.clone(),path:l.path.clone(),
+        weight:rand::rng().random_range(0.65..=1.0),
+        activation_tags:if l.activation_tags.is_empty(){l.tags.clone()}else{l.activation_tags.clone()},
+        character:l.character||l.tags.iter().any(|t|norm(t)=="character"),
+        base_model:l.base_model.clone()
+    }).collect();
+
     let scene=SceneSelection{
         setting:if req.setting.trim().is_empty(){random_one(&["rooftop at blue hour","rainy neon alley","quiet shrine at dawn","sunlit train platform","moonlit forest clearing","coastal city street after rain"])}else{req.setting.trim().into()},
         pose:if req.pose.trim().is_empty(){random_one(&["standing naturally","walking forward","sitting with one knee raised","looking over the shoulder","dynamic three-quarter pose","leaning against a wall"])}else{req.pose.trim().into()},
@@ -487,55 +533,144 @@ fn prepare_generation(req:PrepareRequest)->Result<PreparedGeneration,String>{
     Ok(PreparedGeneration{checkpoint:req.checkpoint,loras,scene,compatibility_keys:keys})
 }
 
-#[tauri::command]
 async fn stream_llm(app:AppHandle,state:tauri::State<'_,AppState>,req:LlmRequest)->Result<(),String>{
     {let mut busy=state.active_stream.lock().await;if *busy{return Err("An LLM stream is already active.".into())}*busy=true;}
     let result=stream_inner(app.clone(),req).await; *state.active_stream.lock().await=false; result
 }
 
 async fn stream_inner(app:AppHandle,req:LlmRequest)->Result<(),String>{
-    let client=reqwest::Client::new(); let base=base_url(&req.settings.base_url);
-    let (url,body,ollama)=if req.settings.provider=="ollama"{
-        (format!("{}/api/chat",base),json!({"model":req.settings.model,"stream":true,"messages":[{"role":"system","content":req.system_prompt},{"role":"user","content":req.user_prompt}],"options":{"temperature":req.settings.temperature,"num_predict":req.settings.max_tokens}}),true)
+    let client=reqwest::Client::new();
+    let base=base_url(&req.settings.base_url);
+    let (url,mut body,ollama)=if req.settings.provider=="ollama"{
+        (format!("{}/api/chat",base),json!({
+            "model":req.settings.model,
+            "stream":true,
+            "format":"json",
+            "messages":[
+                {"role":"system","content":req.system_prompt},
+                {"role":"user","content":req.user_prompt}
+            ],
+            "options":{"temperature":req.settings.temperature,"num_predict":req.settings.max_tokens}
+        }),true)
     }else{
-        (if base.ends_with("/v1"){format!("{}/chat/completions",base)}else{format!("{}/v1/chat/completions",base)},json!({"model":req.settings.model,"stream":true,"temperature":req.settings.temperature,"max_tokens":req.settings.max_tokens,"messages":[{"role":"system","content":req.system_prompt},{"role":"user","content":req.user_prompt}]}),false)
+        (if base.ends_with("/v1"){format!("{}/chat/completions",base)}else{format!("{}/v1/chat/completions",base)},json!({
+            "model":req.settings.model,
+            "stream":true,
+            "temperature":req.settings.temperature,
+            "max_tokens":req.settings.max_tokens,
+            "response_format":{"type":"json_object"},
+            "messages":[
+                {"role":"system","content":req.system_prompt},
+                {"role":"user","content":req.user_prompt}
+            ]
+        }),false)
     };
-    let mut request=client.post(url).json(&body); if !ollama&&!req.settings.api_key.trim().is_empty(){request=request.bearer_auth(req.settings.api_key);}
-    let response=request.send().await.map_err(|e|e.to_string())?; if !response.status().is_success(){return Err(format!("LLM returned HTTP {}",response.status()));}
-    let mut stream=response.bytes_stream(); let mut buffer=String::new();
+
+    let auth_key=req.settings.api_key.clone();
+    let mut request=client.post(&url).json(&body);
+    if !ollama&&!auth_key.trim().is_empty(){request=request.bearer_auth(auth_key.clone());}
+    let mut response=request.send().await.map_err(|e|e.to_string())?;
+
+    if !ollama && response.status()==reqwest::StatusCode::BAD_REQUEST {
+        if let Some(obj)=body.as_object_mut(){obj.remove("response_format");}
+        let mut retry=client.post(&url).json(&body);
+        if !auth_key.trim().is_empty(){retry=retry.bearer_auth(auth_key);}
+        response=retry.send().await.map_err(|e|e.to_string())?;
+    }
+
+    if !response.status().is_success(){
+        let status=response.status();
+        let detail=response.text().await.unwrap_or_default();
+        return Err(format!("LLM returned HTTP {}: {}",status,detail));
+    }
+
+    let mut stream=response.bytes_stream();
+    let mut buffer=String::new();
     while let Some(chunk)=stream.next().await{
         buffer.push_str(&String::from_utf8_lossy(&chunk.map_err(|e|e.to_string())?));
         while let Some(pos)=buffer.find('\n'){
-            let line=buffer[..pos].trim_end_matches('\r').to_string(); buffer=buffer[pos+1..].to_string();
+            let line=buffer[..pos].trim_end_matches('\r').to_string();
+            buffer=buffer[pos+1..].to_string();
             if line.trim().is_empty(){continue}
             let data=if ollama{line.as_str()}else{line.strip_prefix("data: ").unwrap_or("")};
             if data.is_empty()||data=="[DONE]"{continue}
             let v:Value=match serde_json::from_str(data){Ok(x)=>x,Err(_)=>continue};
-            let token=if ollama{v.get("message").and_then(|x|x.get("content")).and_then(|x|x.as_str()).unwrap_or("")}else{v.get("choices").and_then(|x|x.get(0)).and_then(|x|x.get("delta")).and_then(|x|x.get("content")).and_then(|x|x.as_str()).unwrap_or("")};
+            let token=if ollama{
+                v.get("message").and_then(|x|x.get("content")).and_then(|x|x.as_str()).unwrap_or("")
+            }else{
+                v.get("choices").and_then(|x|x.get(0)).and_then(|x|x.get("delta")).and_then(|x|x.get("content")).and_then(|x|x.as_str()).unwrap_or("")
+            };
             if !token.is_empty(){let _=app.emit("llm:delta",json!({"text":token}));}
         }
     }
-    let _=app.emit("llm:done",json!({"ok":true})); Ok(())
+
+    let _=app.emit("llm:done",json!({"ok":true}));
+    Ok(())
 }
 
 fn parse_json(raw:&str)->Result<Value>{
-    let clean=raw.trim(); if let Ok(v)=serde_json::from_str(clean){return Ok(v)}
-    let a=clean.find('{').ok_or_else(||anyhow!("No JSON object in LLM output"))?;
-    let b=clean.rfind('}').ok_or_else(||anyhow!("Incomplete JSON object"))?;
-    serde_json::from_str(&clean[a..=b]).context("Could not parse LLM JSON")
+    let mut clean=raw.trim().to_string();
+    if let Some(end)=clean.rfind("</think>"){clean=clean[end+8..].trim().to_string();}
+    clean=clean.replace("```json","").replace("```","").trim().to_string();
+    for candidate in [clean.clone(),{
+        let a=clean.find('{').unwrap_or(usize::MAX);
+        let b=clean.rfind('}').unwrap_or(0);
+        if a!=usize::MAX && b>=a {clean[a..=b].to_string()} else {String::new()}
+    }] {
+        if candidate.is_empty(){continue;}
+        if let Ok(v)=serde_json::from_str::<Value>(&candidate){return Ok(v);}
+    }
+    Err(anyhow!("No JSON object in LLM output"))
+}
+
+fn fallback_prompt_pair(raw:&str)->Option<PromptPair>{
+    let mut text=raw.trim().to_string();
+    if let Some(end)=text.rfind("</think>"){text=text[end+8..].trim().to_string();}
+    text=text.replace("```","").trim().to_string();
+
+    let lower=text.to_lowercase();
+    let positive_markers=["positive_prompt:", "positive prompt:", "positive:"];
+    let negative_markers=["negative_prompt:", "negative prompt:", "negative:"];
+    let p_start=positive_markers.iter().find_map(|m|lower.find(m).map(|i|i+m.len()));
+    let n_start=negative_markers.iter().find_map(|m|lower.find(m).map(|i|i+m.len()));
+
+    if let (Some(ps),Some(ns))=(p_start,n_start){
+        let (positive,negative)=if ps<ns{
+            (text[ps..ns-ns.min(ps)].trim(), text[ns..].trim())
+        }else{
+            (text[ps..].trim(), text[ns..ps-ns.min(ps)].trim())
+        };
+        if !positive.is_empty() && !negative.is_empty(){
+            return Some(PromptPair{
+                positive_prompt:positive.trim_matches(|c|c=='"'||c=='\'').trim().to_string(),
+                negative_prompt:negative.trim_matches(|c|c=='"'||c=='\'').trim().to_string(),
+                rationale:Some("Recovered from a non-JSON LLM response.".into()),
+            });
+        }
+    }
+
+    if !text.is_empty(){
+        return Some(PromptPair{
+            positive_prompt:text,
+            negative_prompt:"low quality, blurry, bad anatomy, malformed hands, extra fingers, duplicate, text, watermark".into(),
+            rationale:Some("LLM did not return JSON; used its text as the positive prompt.".into()),
+        });
+    }
+    None
 }
 
 #[tauri::command]
 fn parse_prompt_pair(raw:String)->Result<PromptPair,String>{
-    let v=parse_json(&raw).map_err(|e|e.to_string())?;
-    Ok(PromptPair{
-        positive_prompt:v.get("positive_prompt").and_then(|x|x.as_str()).ok_or("Missing positive_prompt")?.to_string(),
-        negative_prompt:v.get("negative_prompt").and_then(|x|x.as_str()).ok_or("Missing negative_prompt")?.to_string(),
-        rationale:v.get("rationale").and_then(|x|x.as_str()).map(str::to_string),
-    })
+    match parse_json(&raw) {
+        Ok(v)=>Ok(PromptPair{
+            positive_prompt:v.get("positive_prompt").and_then(|x|x.as_str()).ok_or("Missing positive_prompt")?.to_string(),
+            negative_prompt:v.get("negative_prompt").and_then(|x|x.as_str()).ok_or("Missing negative_prompt")?.to_string(),
+            rationale:v.get("rationale").and_then(|x|x.as_str()).map(str::to_string),
+        }),
+        Err(_)=>fallback_prompt_pair(&raw).ok_or_else(||"LLM returned no usable prompt text.".to_string()),
+    }
 }
 
-#[tauri::command]
 fn build_workflow(req:WorkflowRequest)->Result<Value,String>{
     let mut map=serde_json::Map::new();
     map.insert("1".into(),json!({"class_type":"CheckpointLoaderSimple","inputs":{"ckpt_name":Path::new(&req.checkpoint.path).file_name().and_then(|x|x.to_str()).unwrap_or(&req.checkpoint.name)}}));
