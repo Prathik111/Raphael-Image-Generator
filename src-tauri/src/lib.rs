@@ -850,6 +850,74 @@ mod tests {
     }
 
     #[test]
+    fn full_generation_pipeline_dry_run() {
+        let checkpoint = ModelInfo {
+            id:"cp1".into(), name:"Anima Base".into(), kind:"checkpoint".into(),
+            path:"D:/ComfyUI/models/checkpoints/anima.safetensors".into(), size:1,
+            base_model:Some("anima".into()), tags:vec!["anima".into()],
+            activation_tags:vec![], character:false, thumbnail:None,
+            source:"raphael-model-manager".into(), cache_name:None, cache_description:None,
+        };
+        let loras = vec![
+            ModelInfo {
+                id:"l1".into(), name:"Character Alice".into(), kind:"lora".into(),
+                path:"D:/ComfyUI/models/loras/alice.safetensors".into(), size:1,
+                base_model:Some("anima".into()), tags:vec!["anima".into(),"character".into(),"alice".into()],
+                activation_tags:vec!["alice_trigger".into()], character:true, thumbnail:None,
+                source:"raphael-model-manager".into(), cache_name:None,
+                cache_description:Some("Character identity LoRA for Alice".into()),
+            },
+            ModelInfo {
+                id:"l2".into(), name:"School Uniform".into(), kind:"lora".into(),
+                path:"D:/ComfyUI/models/loras/uniform.safetensors".into(), size:1,
+                base_model:Some("anima".into()), tags:vec!["anima".into(),"outfit".into()],
+                activation_tags:vec!["school_uniform_trigger".into()], character:false, thumbnail:None,
+                source:"raphael-model-manager".into(), cache_name:None,
+                cache_description:Some("Japanese school uniform clothing".into()),
+            },
+        ];
+        let prepared = prepare_generation(PrepareRequest {
+            checkpoint:checkpoint.clone(), loras:loras,
+            selected_lora_ids:vec!["l1".into(),"l2".into()],
+            setting:"classroom".into(), pose:"standing".into(), expression:"smiling".into(),
+            character:"".into(), dress:"".into(), composition:"three-quarter".into(),
+            additional:"".into(), random_lora_min:2, random_lora_max:2,
+        }).expect("prepare_generation dry run must succeed");
+        assert_eq!(prepared.loras.len(), 2);
+
+        let raw_pair = PromptPair {
+            positive_prompt:"Alice in a classroom, smiling, school uniform, alice_trigger".into(),
+            negative_prompt:"blurry, malformed hands".into(),
+            rationale:None,
+        };
+        let finalized = finalize_prompt_pair(FinalizePromptRequest {
+            prompt_pair:raw_pair,
+            loras:prepared.loras.clone(),
+        }).expect("finalize prompt dry run must succeed");
+        assert!(finalized.positive_prompt.ends_with("alice_trigger, school_uniform_trigger"));
+
+        let workflow = build_workflow(WorkflowRequest {
+            checkpoint:prepared.checkpoint,
+            loras:prepared.loras,
+            width:1024, height:1024, steps:28, cfg:6.5,
+            sampler:"euler".into(), seed:123,
+        }).expect("workflow dry run must succeed");
+
+        let injected = inject_prompts(InjectRequest {
+            workflow,
+            positive_prompt:finalized.positive_prompt.clone(),
+            negative_prompt:finalized.negative_prompt.clone(),
+        }).expect("inject_prompts dry run must succeed");
+
+        let text_nodes:Vec<String> = injected.as_object().unwrap().values()
+            .filter(|node| node["class_type"] == "CLIPTextEncode")
+            .filter_map(|node| node["inputs"]["text"].as_str().map(str::to_string))
+            .collect();
+        assert!(text_nodes.iter().any(|x| x == &finalized.positive_prompt));
+        assert!(text_nodes.iter().any(|x| x == &finalized.negative_prompt));
+    }
+
+    #[test]
     fn activation_prompts_are_deterministically_appended() {
         let pair = PromptPair {
             positive_prompt: "portrait, blue eyes, serene expression, triggerA".into(),
