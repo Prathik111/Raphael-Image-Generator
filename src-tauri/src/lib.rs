@@ -716,7 +716,7 @@ fn finalize_positive_prompt(raw:&str, loras:&[SelectedLora])->String{
             let tag=tag.trim();
             if tag.is_empty(){continue;}
             positive=strip_exact_ci(&positive,tag);
-            if !triggers.iter().any(|x:String|x.eq_ignore_ascii_case(tag)){
+            if !triggers.iter().any(|x:&String|x.eq_ignore_ascii_case(tag)){
                 triggers.push(tag.to_string());
             }
         }
