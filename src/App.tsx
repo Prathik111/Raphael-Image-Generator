@@ -311,10 +311,15 @@ function App(){
     }catch{}
   }
 
+  async function fetchModels(settings:LlmSettings){
+    const found=await apiInvoke<string[]>('list_provider_models',{settings});
+    setModels(found);
+    return found;
+  }
+
   async function refreshModels(){
     try{
-      const found=await apiInvoke<string[]>('list_provider_models',{settings:llm});
-      setModels(found);
+      const found=await fetchModels(llm);
       if(!llm.model && found[0]) setLlm(x=>({...x,model:found[0]}));
     }catch(e){
       setError(String(e));
@@ -827,7 +832,12 @@ function App(){
                 </select>
               </label>
               <div className="inline-controls">
-                <button className="secondary-btn" onClick={()=>void (async()=>{const before=llm;try{setLlm(generationDraft.llm);await refreshModels();}finally{setLlm(before);}})()}><RefreshCw size={13}/> GET MODELS</button>
+                <button className="secondary-btn" onClick={()=>void (async()=>{
+                  try{
+                    const found=await fetchModels(generationDraft.llm);
+                    setGenerationDraft(d=>({...d,llm:{...d.llm,model:d.llm.model || found[0] || ''}}));
+                  }catch(e){setError(String(e));}
+                })()}><RefreshCw size={13}/> GET MODELS</button>
               </div>
               <label className="wide-field"><span>TEMPERATURE · {generationDraft.llm.temperature.toFixed(2)}</span><input type="range" min={0} max={2} step={0.05} value={generationDraft.llm.temperature} onChange={e=>setGenerationDraft(d=>({...d,llm:{...d.llm,temperature:Number(e.target.value)}}))}/></label>
               <label className="wide-field"><span>MAX OUTPUT TOKENS</span><input type="number" min={128} max={16384} value={generationDraft.llm.maxTokens} onChange={e=>setGenerationDraft(d=>({...d,llm:{...d.llm,maxTokens:Math.max(128,Number(e.target.value))}}))}/></label>
