@@ -1148,7 +1148,8 @@ async fn web_command(
     }
 
     let req_value=body.get("req").cloned().unwrap_or_else(||body.clone());
-    let result:Result<Value,String>=match command.as_str(){
+    let result:Result<Value,String>=async {
+        match command.as_str(){
         "discover_raphael_config"=>serde_json::to_value(discover_raphael_config()).map_err(|e|e.to_string()),
         "discover_raphael_roots"=>serde_json::to_value(discover_raphael_roots()).map_err(|e|e.to_string()),
         "list_provider_models"=>{
@@ -1196,7 +1197,8 @@ async fn web_command(
             serde_json::to_value(path_to_data_url(path.to_string())?).map_err(|e|e.to_string())
         }
         _=>Err(format!("Unknown API command: {}",command))
-    };
+        }
+    }.await;
     match result{Ok(value)=>AxumJson(value).into_response(),Err(e)=>http_error(e)}
 }
 
