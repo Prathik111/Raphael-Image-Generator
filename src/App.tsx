@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
-import { invoke } from '@tauri-apps/api/core';
-import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { Channel, invoke } from '@tauri-apps/api/core';
 import { Check, CircleAlert, Copy, Database, FolderOpen, History, Layers3, Play, RefreshCw, Settings2, Sparkles, Terminal, WandSparkles, X } from 'lucide-react';
 import type { Constraints, GenerationRecord, LibrarySnapshot, LlmSettings, PreparedGeneration, PromptPair, ProviderKind } from './types';
 
@@ -66,7 +65,6 @@ function App() {
   const [thumbs, setThumbs] = useState<Record<string,string>>({});
   const [selectedLoraIds, setSelectedLoraIds] = useState<string[]>([]);
   const streamText = useRef('');
-  const unlisten = useRef<UnlistenFn | null>(null);
 
   const selected = useMemo(
     () => library?.checkpoints.find(x => x.id === selectedId) || library?.checkpoints[0],
@@ -87,7 +85,7 @@ function App() {
     void loadHistory();
     void refreshModels();
     void discoverRoots();
-    return () => unlisten.current?.();
+    return () => undefined;
   }, []);
 
   useEffect(() => { setLlm(x => ({...x, provider})); }, [provider]);
@@ -211,14 +209,14 @@ function App() {
       streamText.current = '';
       setStream('');
       setPrompts(null);
-      unlisten.current?.();
 
-      unlisten.current = await listen<{text:string}>('llm:delta', event => {
-        streamText.current += event.payload.text;
+      const onEvent = new Channel<{text:string}>();
+      onEvent.onmessage = event => {
+        streamText.current += event.text;
         flushSync(() => {
           setStream(streamText.current);
         });
-      });
+      };
 
       const loraMetadata = prep.loras.map((l, index) =>
         'LORA ' + (index + 1) + '\n' +
@@ -255,9 +253,12 @@ function App() {
         'EXTRA: ' + (constraints.additional || '(none)') + '\n\n' +
         'Write a complete, coherent positive prompt that uses the selected LoRAs according to their documented purposes, plus a robust negative prompt.';
 
-      await invoke('stream_llm', {req:{
-        settings:llm, systemPrompt, userPrompt,
-      }});
+      await invoke('stream_llm', {
+        req:{
+          settings:llm, systemPrompt, userPrompt,
+        },
+        onEvent,
+      });
 
       const rawPair = await invoke<PromptPair>('parse_prompt_pair', {raw:streamText.current});
       const pair = await invoke<PromptPair>('finalize_prompt_pair', {
@@ -265,8 +266,6 @@ function App() {
       });
       setPrompts(pair);
       setStageStatus('llm','done');
-      unlisten.current?.();
-      unlisten.current = null;
 
       setStage('workflow');
       setStageStatus('workflow','running');
@@ -323,8 +322,6 @@ function App() {
       setError(String(e));
       setStageStatus(stage,'error');
     } finally {
-      unlisten.current?.();
-      unlisten.current = null;
       setBusy(false);
     }
   }
