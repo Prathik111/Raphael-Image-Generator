@@ -1282,7 +1282,13 @@ mod tests {
             assert_eq!(workflow[id]["class_type"], "LoraLoaderModelOnly");
             assert_eq!(workflow[id]["inputs"]["model"], json!([previous,0]));
             assert_eq!(workflow[id]["inputs"]["lora_name"], lora_name);
-            assert_eq!(workflow[id]["inputs"]["strength_model"], json!(weight));
+            let actual_weight = workflow[id]["inputs"]["strength_model"]
+                .as_f64()
+                .expect("strength_model must be a JSON number");
+            assert!(
+                (actual_weight - weight as f64).abs() < 1e-6,
+                "strength_model mismatch: actual={actual_weight}, expected={weight}"
+            );
         }
         assert_eq!(workflow["7"]["inputs"]["model"], json!(["16",0]));
         assert!(workflow.get("17").is_none());
