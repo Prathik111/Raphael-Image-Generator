@@ -1085,12 +1085,13 @@ async fn monitor_comfy_generation(
                                 }
                                 "executing"=>{
                                     let node=data.get("node").and_then(|x|x.as_str()).map(str::to_string);
+                                    let progress_status=if node.is_some(){"running".into()}else{"finishing".into()};
                                     let _=on_event.send(ComfyProgress{
                                         percent:last_percent,
                                         current:last_current,
                                         total:last_total,
                                         node,
-                                        status:if node.is_some(){"running".into()}else{"finishing".into()},
+                                        status:progress_status,
                                     });
                                 }
                                 "execution_error"=>{
@@ -1365,8 +1366,10 @@ mod tests {
 
         let injected = inject_prompts(InjectRequest {
             workflow,
-            positive_prompt:finalized.positive_prompt.clone(),
-            negative_prompt:finalized.negative_prompt.clone(),
+            positivePrompt:None,
+            positive_prompt:Some(finalized.positive_prompt.clone()),
+            negativePrompt:None,
+            negative_prompt:Some(finalized.negative_prompt.clone()),
         }).expect("inject_prompts dry run must succeed");
 
         let text_nodes:Vec<String> = injected.as_object().unwrap().values()
