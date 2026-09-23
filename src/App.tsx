@@ -721,7 +721,8 @@ function App(){
         <button onClick={()=>void copy(webHost.lanUrl)}><Copy size={12}/> COPY ADDRESS</button>
       </div>}
 
-      {settingsOpen && <div className="settings-drawer">
+      {settingsOpen && <div className="settings-overlay" onMouseDown={()=>setSettingsOpen(false)}>
+        <div className="settings-drawer" onMouseDown={e=>e.stopPropagation()}>
         <div className="drawer-head">
           <div>
             <div className="kicker">GENERATION</div>
@@ -818,6 +819,7 @@ function App(){
         <div className="drawer-foot">
           <button className="secondary-btn" onClick={()=>setSettingsOpen(false)}>CANCEL</button>
           <button className="primary-btn" onClick={saveGenerationSettings}>SAVE SETTINGS</button>
+        </div>
         </div>
       </div>}
     </aside>
