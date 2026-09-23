@@ -221,7 +221,7 @@ fn load_manager_models(db_path: &Path, comfy_root: &Path) -> Result<(Vec<ModelIn
         .map_err(|e| format!("Could not open Raphael Model Manager database {}: {}", db_path.display(), e))?;
 
     let mut stmt = conn.prepare(
-        "SELECT id,path,filename,model_type,size_bytes,base_model,description,tags_json,activation_json,thumbnail_path,civitai_name,version_name
+        "SELECT id,path,filename,model_type,size_bytes,base_model,description,tags_json,activation_json,thumbnail_path,cover_path,civitai_name,version_name
          FROM models"
     ).map_err(|e| format!("Raphael database schema error: {}", e))?;
 
@@ -238,13 +238,14 @@ fn load_manager_models(db_path: &Path, comfy_root: &Path) -> Result<(Vec<ModelIn
         let tags_json: String = row.get(7)?;
         let activation_json: String = row.get(8)?;
         let thumbnail_path: Option<String> = row.get(9)?;
-        let civitai_name: Option<String> = row.get(10)?;
-        let version_name: Option<String> = row.get(11)?;
-        Ok((id,path,filename,model_type,size_bytes,base_model,description,tags_json,activation_json,thumbnail_path,civitai_name,version_name))
+        let cover_path: Option<String> = row.get(10)?;
+        let civitai_name: Option<String> = row.get(11)?;
+        let version_name: Option<String> = row.get(12)?;
+        Ok((id,path,filename,model_type,size_bytes,base_model,description,tags_json,activation_json,thumbnail_path,cover_path,civitai_name,version_name))
     }).map_err(|e| format!("Could not read Raphael model records: {}", e))?;
 
     for row in rows {
-        let (id,path,filename,model_type,size_bytes,base_model,description,tags_json,activation_json,thumbnail_path,civitai_name,version_name) =
+        let (id,path,filename,model_type,size_bytes,base_model,description,tags_json,activation_json,thumbnail_path,cover_path,civitai_name,version_name) =
             row.map_err(|e| format!("Could not decode Raphael model record: {}", e))?;
         let Some(kind) = manager_model_type(&model_type) else { continue };
         let model_path = PathBuf::from(&path);
@@ -256,7 +257,8 @@ fn load_manager_models(db_path: &Path, comfy_root: &Path) -> Result<(Vec<ModelIn
         if tags.is_empty() && kind == "lora" && !activation_tags.is_empty() {
             tags = activation_tags.clone();
         }
-        let thumbnail = thumbnail_path
+        let thumbnail = cover_path
+            .or(thumbnail_path)
             .map(PathBuf::from)
             .filter(|p| p.is_file())
             .map(|p| p.to_string_lossy().to_string());
