@@ -431,14 +431,14 @@ function App(){
   }
 
   function toggleLora(id:string){
-    setManualLoraIds(current=>{
-      const next=current.includes(id) ? current.filter(x=>x!==id) : [...current,id];
-      setSelectedLoraIds(selected=>{
-        const withoutId=selected.filter(x=>x!==id && compatibleLoras.some(lora=>lora.id===x));
-        return next.includes(id) ? [...withoutId,id] : withoutId;
-      });
-      return next;
-    });
+    const alreadySelected=selectedLoraIds.includes(id);
+    if(alreadySelected){
+      setSelectedLoraIds(current=>current.filter(x=>x!==id));
+      setManualLoraIds(current=>current.filter(x=>x!==id));
+    }else{
+      setSelectedLoraIds(current=>[...current,id]);
+      setManualLoraIds(current=>[...current,id]);
+    }
     setPrepared(null);
     setPrompts(null);
   }
@@ -845,6 +845,7 @@ function App(){
               <div><span>DEMOGRAPHIC</span><b>{selectedHistory.generationSettings.demographic.toUpperCase()}</b></div>
               <div><span>TEMPERATURE</span><b>{selectedHistory.generationSettings.llm.temperature.toFixed(2)}</b></div>
               <div><span>MAX TOKENS</span><b>{selectedHistory.generationSettings.llm.maxTokens}</b></div>
+              <div><span>CONTEXT TOKENS</span><b>{selectedHistory.generationSettings.llm.contextTokens || 16384}</b></div>
               <div><span>SIZE</span><b>{selectedHistory.generationSettings.width} × {selectedHistory.generationSettings.height}</b></div>
               <div><span>STEPS</span><b>{selectedHistory.generationSettings.steps}</b></div>
               <div><span>CFG</span><b>{selectedHistory.generationSettings.cfg}</b></div>
