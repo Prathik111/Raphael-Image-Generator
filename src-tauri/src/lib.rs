@@ -1292,8 +1292,10 @@ async fn start_web_host(app:AppHandle,state:tauri::State<'_,AppState>,port:Optio
 
     let chosen_port=port.unwrap_or(1424);
     let lan_host=lan_ip();
-    if lan_host=="127.0.0.1"{
-        return Err("No LAN IPv4 address was detected. Connect the computer to the LAN and try again.".into());
+    let parsed_lan_host=lan_host.parse::<std::net::Ipv4Addr>().ok();
+    let lan_only=parsed_lan_host.map(|ip| ip.is_private() || ip.is_link_local()).unwrap_or(false);
+    if !lan_only{
+        return Err("No private LAN IPv4 address was detected. Connect the computer to the same local network and try again.".into());
     }
     let listener=tokio::net::TcpListener::bind((lan_host.as_str(),chosen_port))
         .await
