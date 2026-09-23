@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use base64::Engine;
 use futures_util::StreamExt;
-use rand::{seq::SliceRandom, Rng};
+use rand::{prelude::IndexedRandom, seq::SliceRandom, Rng};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{fs, path::{Path, PathBuf}, sync::Arc, time::{SystemTime, UNIX_EPOCH}};
