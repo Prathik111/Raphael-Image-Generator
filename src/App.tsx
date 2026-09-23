@@ -648,7 +648,7 @@ function App(){
     setWebHostBusy(true);
     setWebHostError('');
     try{
-      const info=await apiInvoke<WebHostInfo>('start_web_host',{port:1421});
+      const info=await apiInvoke<WebHostInfo>('start_web_host',{port:1424});
       setWebHost(info);
       setToast('LAN host ready · ' + info.lanUrl);
     }catch(e){
