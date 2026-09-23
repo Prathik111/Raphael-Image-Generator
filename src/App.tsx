@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
 import { Channel, invoke } from '@tauri-apps/api/core';
 import {
-  Check, CircleAlert, Copy, Database, FolderOpen, Globe2, History, Layers3, Play,
+  Check, CircleAlert, Copy, Globe2, History, Layers3, Play,
   RefreshCw, Search, Settings2, Sparkles, Terminal, WandSparkles, X
 } from 'lucide-react';
 import type {
