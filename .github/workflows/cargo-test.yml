@@ -15,3 +15,11 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       - name: Cargo test
         run: cargo test --manifest-path src-tauri/Cargo.toml --all-targets
+      - name: Node toolchain
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Frontend build
+        run: |
+          npm install
+          npm run build
