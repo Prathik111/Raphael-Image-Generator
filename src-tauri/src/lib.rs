@@ -89,6 +89,7 @@ struct WorkflowRequest {
     steps: u32, cfg: f32, sampler: String, seed: i64,
 }
 
+#[allow(non_snake_case)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct InjectRequest {
     workflow: Value,
