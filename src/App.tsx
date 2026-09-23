@@ -437,6 +437,8 @@ function App(){
     setComfyStatus('idle');
     setResultImage('');
     setResultFilename('');
+    let generatedImageDataUrl='';
+    let generatedImageFilename='';
 
     try{
       const generationSelectedLoraIds=selectedLoraIds.filter(id=>compatibleLoras.some(lora=>lora.id===id));
@@ -551,8 +553,14 @@ function App(){
           setComfyStatus(event.status);
         });
 
-        if(generation.imageDataUrl) setResultImage(generation.imageDataUrl);
-        if(generation.filename) setResultFilename(generation.filename);
+        if(generation.imageDataUrl){
+          generatedImageDataUrl=generation.imageDataUrl;
+          setResultImage(generation.imageDataUrl);
+        }
+        if(generation.filename){
+          generatedImageFilename=generation.filename;
+          setResultFilename(generation.filename);
+        }
         setComfyProgress(100);
         setComfyStatus('done');
         setStageStatus('comfy','done');
@@ -589,8 +597,8 @@ function App(){
         negativePrompt:pair.negative_prompt,
         rationale:pair.rationale,
         generationSettings:historySettings,
-        imageDataUrl:resultImage || undefined,
-        imageFilename:resultFilename || undefined,
+        imageDataUrl:generatedImageDataUrl || undefined,
+        imageFilename:generatedImageFilename || undefined,
         workflow:injected,
         comfyPromptId:promptId,
       };
