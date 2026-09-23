@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use base64::Engine;
 use futures_util::StreamExt;
 use rand::{prelude::IndexedRandom, seq::SliceRandom, Rng};
@@ -533,6 +533,7 @@ fn prepare_generation(req:PrepareRequest)->Result<PreparedGeneration,String>{
     Ok(PreparedGeneration{checkpoint:req.checkpoint,loras,scene,compatibility_keys:keys})
 }
 
+#[tauri::command]
 async fn stream_llm(app:AppHandle,state:tauri::State<'_,AppState>,req:LlmRequest)->Result<(),String>{
     {let mut busy=state.active_stream.lock().await;if *busy{return Err("An LLM stream is already active.".into())}*busy=true;}
     let result=stream_inner(app.clone(),req).await; *state.active_stream.lock().await=false; result
@@ -676,6 +677,7 @@ fn parse_prompt_pair(raw:String)->Result<PromptPair,String>{
     }
 }
 
+#[tauri::command]
 fn build_workflow(req:WorkflowRequest)->Result<Value,String>{
     let mut map=serde_json::Map::new();
     map.insert("1".into(),json!({"class_type":"CheckpointLoaderSimple","inputs":{"ckpt_name":Path::new(&req.checkpoint.path).file_name().and_then(|x|x.to_str()).unwrap_or(&req.checkpoint.name)}}));
