@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { flushSync } from 'react-dom';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { Check, CircleAlert, Copy, Database, FolderOpen, History, Layers3, Play, RefreshCw, Settings2, Sparkles, Terminal, WandSparkles, X } from 'lucide-react';
@@ -64,6 +65,7 @@ function App() {
   const [toast, setToast] = useState('');
   const [thumbs, setThumbs] = useState<Record<string,string>>({});
   const [selectedLoraIds, setSelectedLoraIds] = useState<string[]>([]);
+  const streamText = useRef('');
   const unlisten = useRef<UnlistenFn | null>(null);
 
   const selected = useMemo(
@@ -206,14 +208,16 @@ function App() {
 
       setStage('llm');
       setStageStatus('llm','running');
+      streamText.current = '';
       setStream('');
       setPrompts(null);
       unlisten.current?.();
 
-      const chunks: string[] = [];
       unlisten.current = await listen<{text:string}>('llm:delta', event => {
-        chunks.push(event.payload.text);
-        setStream(chunks.join(''));
+        streamText.current += event.payload.text;
+        flushSync(() => {
+          setStream(streamText.current);
+        });
       });
 
       const loraMetadata = prep.loras.map((l, index) =>
@@ -255,7 +259,7 @@ function App() {
         settings:llm, systemPrompt, userPrompt,
       }});
 
-      const rawPair = await invoke<PromptPair>('parse_prompt_pair', {raw:chunks.join('')});
+      const rawPair = await invoke<PromptPair>('parse_prompt_pair', {raw:streamText.current});
       const pair = await invoke<PromptPair>('finalize_prompt_pair', {
         req:{promptPair:rawPair, loras:prep.loras},
       });
