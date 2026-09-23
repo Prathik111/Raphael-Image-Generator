@@ -795,22 +795,108 @@ fn finalize_prompt_pair(req:FinalizePromptRequest)->Result<PromptPair,String>{
     })
 }
 
+fn comfy_relative_model_name(path: &str, folder: &str, fallback: &str) -> String {
+    let normalized = path.replace('\\', "/");
+    let marker = format!("/{}/", folder);
+    if let Some(index) = normalized.to_lowercase().find(&marker) {
+        return normalized[index + marker.len()..].replace('/', "\\");
+    }
+    fallback.to_string()
+}
+
 #[tauri::command]
 fn build_workflow(req:WorkflowRequest)->Result<Value,String>{
+    // Reference workflow: Anima UNET + CLIP + VAE + text encoders + sampler + decode + save.
+    // Only the model LoRA chain is generated dynamically.
     let mut map=serde_json::Map::new();
-    map.insert("1".into(),json!({"class_type":"CheckpointLoaderSimple","inputs":{"ckpt_name":Path::new(&req.checkpoint.path).file_name().and_then(|x|x.to_str()).unwrap_or(&req.checkpoint.name)}}));
-    let mut last="1".to_string(); let mut id=2u32;
-    for l in &req.loras{
-        map.insert(id.to_string(),json!({"class_type":"LoraLoader","inputs":{"model":[last,0],"clip":[last,1],"lora_name":Path::new(&l.path).file_name().and_then(|x|x.to_str()).unwrap_or(&l.name),"strength_model":l.weight,"strength_clip":l.weight}}));
-        last=id.to_string(); id+=1;
+
+    let unet_name = comfy_relative_model_name(
+        &req.checkpoint.path,
+        "unet",
+        Path::new(&req.checkpoint.path)
+            .file_name()
+            .and_then(|x|x.to_str())
+            .unwrap_or(&req.checkpoint.name),
+    );
+    map.insert("13".into(),json!({
+        "class_type":"UNETLoader",
+        "inputs":{"unet_name":unet_name,"weight_dtype":"default"}
+    }));
+
+    map.insert("4".into(),json!({
+        "class_type":"CLIPLoader",
+        "inputs":{"clip_name":"anima\\oneObsession_anima29BV1_txt.safetensors","type":"stable_diffusion","device":"default"}
+    }));
+
+    map.insert("9".into(),json!({
+        "class_type":"VAELoader",
+        "inputs":{"vae_name":"anima\\qwen_image_vae.safetensors"}
+    }));
+
+    map.insert("5".into(),json!({
+        "class_type":"CLIPTextEncode",
+        "inputs":{"clip":["4",0],"text":"__POSITIVE_PROMPT__"}
+    }));
+    map.insert("6".into(),json!({
+        "class_type":"CLIPTextEncode",
+        "inputs":{"clip":["4",0],"text":"__NEGATIVE_PROMPT__"}
+    }));
+
+    map.insert("8".into(),json!({
+        "class_type":"EmptyLatentImage",
+        "inputs":{"width":req.width,"height":req.height,"batch_size":1}
+    }));
+
+    let mut last_model = "13".to_string();
+    let mut next_id = 14u32;
+    for lora in &req.loras {
+        let id = next_id.to_string();
+        let lora_name = comfy_relative_model_name(
+            &lora.path,
+            "loras",
+            Path::new(&lora.path)
+                .file_name()
+                .and_then(|x|x.to_str())
+                .unwrap_or(&lora.name),
+        );
+        map.insert(id.clone(),json!({
+            "class_type":"LoraLoaderModelOnly",
+            "inputs":{
+                "model":[last_model.clone(),0],
+                "lora_name":lora_name,
+                "strength_model":lora.weight
+            }
+        }));
+        last_model=id;
+        next_id+=1;
     }
-    let pos=id; let neg=id+1; let latent=id+2; let sampler=id+3; let decode=id+4; let save=id+5;
-    map.insert(pos.to_string(),json!({"class_type":"CLIPTextEncode","inputs":{"text":"__POSITIVE_PROMPT__","clip":[last,1]}}));
-    map.insert(neg.to_string(),json!({"class_type":"CLIPTextEncode","inputs":{"text":"__NEGATIVE_PROMPT__","clip":[last,1]}}));
-    map.insert(latent.to_string(),json!({"class_type":"EmptyLatentImage","inputs":{"width":req.width,"height":req.height,"batch_size":1}}));
-    map.insert(sampler.to_string(),json!({"class_type":"KSampler","inputs":{"model":[last,0],"positive":[pos,0],"negative":[neg,0],"latent_image":[latent,0],"seed":req.seed,"steps":req.steps,"cfg":req.cfg,"sampler_name":req.sampler,"scheduler":"normal","denoise":1.0}}));
-    map.insert(decode.to_string(),json!({"class_type":"VAEDecode","inputs":{"samples":[sampler,0],"vae":["1",2]}}));
-    map.insert(save.to_string(),json!({"class_type":"SaveImage","inputs":{"images":[decode,0],"filename_prefix":"RaphaelPromptForge"}}));
+
+    map.insert("7".into(),json!({
+        "class_type":"KSampler",
+        "inputs":{
+            "model":[last_model,0],
+            "positive":["5",0],
+            "negative":["6",0],
+            "latent_image":["8",0],
+            "seed":req.seed,
+            "steps":req.steps,
+            "cfg":req.cfg,
+            "sampler_name":req.sampler,
+            "scheduler":"normal",
+            "denoise":1.0
+        }
+    }));
+
+    map.insert("10".into(),json!({
+        "class_type":"VAEDecode",
+        "inputs":{"samples":["7",0],"vae":["9",0]}
+    }));
+
+    map.insert("12".into(),json!({
+        "class_type":"SaveImage",
+        "inputs":{"images":["10",0],"filename_prefix":"Anima"}
+    }));
+
     Ok(Value::Object(map))
 }
 
