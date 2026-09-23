@@ -7,6 +7,25 @@ import type { Constraints, GenerationRecord, LibrarySnapshot, LlmSettings, Prepa
 type Stage = 'library' | 'compatibility' | 'selection' | 'llm' | 'workflow' | 'comfy' | 'recorded';
 type Status = 'idle' | 'running' | 'done' | 'error';
 
+function normUi(value: string) {
+  return value.trim().toLowerCase().replace(/[ _\-./]+/g, '');
+}
+
+function isCompatibleLoraUi(lora: LibrarySnapshot['loras'][number], checkpoint: LibrarySnapshot['checkpoints'][number]) {
+  const keys = [...checkpoint.tags, checkpoint.baseModel || '', checkpoint.name]
+    .map(normUi)
+    .filter(x => x.length > 2);
+  const explicit = !!lora.baseModel && keys.some(k => {
+    const b = normUi(lora.baseModel || '');
+    return k === b || k.includes(b) || b.includes(k);
+  });
+  const tagged = lora.tags.some(tag => {
+    const t = normUi(tag);
+    return keys.some(k => k === t || k.includes(t) || t.includes(k));
+  });
+  return explicit || tagged;
+}
+
 const stages: Array<{key: Stage; label: string}> = [
   {key:'library',label:'LIBRARY'},{key:'compatibility',label:'COMPATIBILITY'},
   {key:'selection',label:'RANDOM STACK'},{key:'llm',label:'LLM PROMPT'},
@@ -44,11 +63,22 @@ function App() {
   const [error, setError] = useState('');
   const [toast, setToast] = useState('');
   const [thumbs, setThumbs] = useState<Record<string,string>>({});
+  const [selectedLoraIds, setSelectedLoraIds] = useState<string[]>([]);
   const unlisten = useRef<UnlistenFn | null>(null);
 
   const selected = useMemo(
     () => library?.checkpoints.find(x => x.id === selectedId) || library?.checkpoints[0],
     [library, selectedId],
+  );
+
+  const compatibleLoras = useMemo(
+    () => (library && selected ? library.loras.filter(lora => isCompatibleLoraUi(lora, selected)) : []),
+    [library, selected],
+  );
+
+  const manualLoras = useMemo(
+    () => compatibleLoras.filter(lora => selectedLoraIds.includes(lora.id)),
+    [compatibleLoras, selectedLoraIds],
   );
 
   useEffect(() => {
@@ -62,7 +92,7 @@ function App() {
 
   useEffect(() => {
     if (!library) return;
-    for (const model of library.checkpoints.slice(0, 24)) {
+    for (const model of [...library.checkpoints, ...library.loras].slice(0, 80)) {
       if (!model.thumbnail || thumbs[model.id]) continue;
       void invoke<string>('path_to_data_url', {path:model.thumbnail})
         .then(url => setThumbs(x => ({...x, [model.id]:url})))
@@ -133,22 +163,29 @@ function App() {
     setStage('compatibility');
     setStageStatus('compatibility','running');
     try {
-      await invoke<PreparedGeneration>('prepare_generation', {
-        req:{checkpoint:selected, loras:library.loras, ...constraints},
-      }).then(result => {
-        setPrepared(result);
-        setStageStatus('compatibility','done');
-        setStage('selection');
-        setStageStatus('selection','done');
-        return result;
+      const result = await invoke<PreparedGeneration>('prepare_generation', {
+        req:{checkpoint:selected, loras:library.loras, selectedLoraIds:[], ...constraints},
       });
-      return prepared;
+      setPrepared(result);
+      setSelectedLoraIds(result.loras.map(lora => lora.id));
+      setStageStatus('compatibility','done');
+      setStage('selection');
+      setStageStatus('selection','done');
+      return result;
     } catch (e) {
       setStageStatus('compatibility','error');
       setStageStatus('selection','error');
       setError(String(e));
       return null;
     }
+  }
+
+  function toggleLora(id:string) {
+    setSelectedLoraIds(current => current.includes(id)
+      ? current.filter(x => x !== id)
+      : [...current, id]);
+    setPrepared(null);
+    setPrompts(null);
   }
 
   async function generate() {
@@ -160,7 +197,7 @@ function App() {
       setStage('compatibility');
       setStageStatus('compatibility','running');
       const prep = await invoke<PreparedGeneration>('prepare_generation', {
-        req:{checkpoint:selected, loras:library.loras, ...constraints},
+        req:{checkpoint:selected, loras:library.loras, selectedLoraIds, ...constraints},
       });
       setPrepared(prep);
       setStageStatus('compatibility','done');
@@ -316,7 +353,7 @@ function App() {
           {!library?.checkpoints.length
             ? <div className="empty-state"><Database size={22}/><div><b>NO CHECKPOINT LIBRARY LOADED</b><span>Set your ComfyUI models folder and scan it.</span></div></div>
             : <div className="checkpoint-grid">{library.checkpoints.map(model =>
-              <button key={model.id} className={'model-card ' + (selected?.id === model.id ? 'selected' : '')} onClick={() => {setSelectedId(model.id); setPrepared(null); setPrompts(null);}}>
+              <button key={model.id} className={'model-card ' + (selected?.id === model.id ? 'selected' : '')} onClick={() => {setSelectedId(model.id); setSelectedLoraIds([]); setPrepared(null); setPrompts(null);}}>
                 <div className="model-thumb">
                   {thumbs[model.id] ? <img src={thumbs[model.id]} alt=""/> : <div className="thumb-fallback"><Layers3 size={28}/><span>{(model.baseModel || model.name).slice(0,18).toUpperCase()}</span></div>}
                   <div className="thumb-overlay"><span>{model.baseModel || 'BASE UNKNOWN'}</span><span>{Math.round(model.size / 1024 / 1024) || 0} MB</span></div>
@@ -324,6 +361,32 @@ function App() {
                 <div className="model-body"><div className="model-name">{model.name}</div><div className="model-type">CHECKPOINT <span>{model.source.toUpperCase()}</span></div><div className="model-tags">{model.tags.slice(0,4).map(t => <span key={t}>{t}</span>)}</div></div>
               </button>
             )}</div>}
+        </section>
+
+        <section className="panel lora-selector-panel">
+          <div className="panel-head">
+            <div><div className="kicker">COMPATIBLE LoRA LIBRARY</div><div className="panel-title">SELECT LoRAs MANUALLY</div></div>
+            <div className="lora-count">{manualLoras.length} SELECTED · {compatibleLoras.length} COMPATIBLE</div>
+          </div>
+          {!selected ? <div className="lora-empty">SELECT A CHECKPOINT FIRST</div> :
+           !compatibleLoras.length ? <div className="lora-empty">NO COMPATIBLE LoRAs FOUND FOR THIS CHECKPOINT</div> :
+           <div className="lora-grid">
+            {compatibleLoras.map(lora =>
+              <button key={lora.id}
+                className={'lora-card ' + (selectedLoraIds.includes(lora.id) ? 'selected' : '')}
+                onClick={() => toggleLora(lora.id)}>
+                <div className="lora-thumb">
+                  {thumbs[lora.id] ? <img src={thumbs[lora.id]} alt="" /> : <div className="lora-fallback"><Layers3 size={18}/></div>}
+                  {lora.character && <span>CHARACTER</span>}
+                </div>
+                <div className="lora-body">
+                  <div className="lora-name">{lora.name}</div>
+                  <div className="lora-tags">{lora.tags.slice(0,3).map(tag => <span key={tag}>{tag}</span>)}</div>
+                </div>
+                <div className="lora-check">{selectedLoraIds.includes(lora.id) ? <Check size={12}/> : ''}</div>
+              </button>
+            )}
+           </div>}
         </section>
 
         <section className="lower-grid">
