@@ -1,0 +1,17 @@
+name: Cargo Test
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  cargo-test:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cargo test
+        run: cargo test --manifest-path src-tauri/Cargo.toml --all-targets
