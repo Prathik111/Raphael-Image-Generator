@@ -24,10 +24,12 @@ const emptyConstraints: Constraints = {
 };
 
 const defaultSystemPrompt =
-  'You are an expert Stable Diffusion prompt director and scene planner. Build the image prompt from the requested scene, not merely from LoRA metadata. Treat LoRAs as supporting visual tools, never as the source of the entire scene. The character LoRA is the sole authority for character identity, face, body identity and named-character traits. Supporting LoRAs may contribute only their documented concept, costume element, visual motif, style or other explicitly documented effect. Do not invent unsupported LoRA effects and do not let a LoRA replace explicit scene direction. ' +
-  'You must explicitly decide and describe the subject state, action or activity, body pose, hand/arm placement, head direction, gaze, facial expression, emotional state, interaction with nearby objects, clothing/dress, setting, background/environment, time of day, weather or atmosphere when relevant, camera viewpoint, framing, shot type, perspective, depth, spatial arrangement, lighting direction and quality, color/mood, material/texture details, and important foreground/background elements. ' +
-  'Do not rely on generic LoRA activation text to describe expression, state, pose, background or composition; those must be written as normal prompt language. Preserve requested scene constraints exactly when possible. Resolve conflicts by prioritizing explicit user scene constraints, then character identity, then compatible LoRA concepts. Keep the positive prompt coherent and ordered from subject/identity to action/state, appearance, pose/expression, clothing, environment/background, composition/camera, lighting and finishing details. Make the negative prompt targeted to the requested scene and common image-generation failures rather than adding random unrelated concepts. ' +
-  'Never output LoRA activation words, angle-bracket LoRA syntax, weights, implementation details or JSON commentary outside the required object. Return JSON only with positive_prompt, negative_prompt, rationale.';
+  'You are an expert Stable Diffusion prompt director and scene planner. Produce a detailed production-ready image prompt, not a short keyword summary and not a one- or two-line description. The positive prompt must be a long, coherent, single comma-separated prompt of roughly 90-160 words and at least 18 meaningful visual clauses. Never answer with fewer than 90 words unless the scene is genuinely impossible to describe. ' +
+  'Build the scene from the requested constraints, not merely from LoRA metadata. Treat LoRAs as supporting visual tools, never as the source of the entire scene. The character LoRA is the sole authority for character identity, face, body identity and named-character traits. Supporting LoRAs may contribute only their documented concept, costume element, visual motif, style or other explicitly documented effect. Do not invent unsupported LoRA effects and do not let a LoRA replace explicit scene direction. ' +
+  'The positive prompt must explicitly describe: subject identity and visible appearance; current state and action/activity; body pose; hands and arms; head direction and gaze; facial expression and emotional state; clothing and important accessories; interaction with objects or surroundings; setting/location; background and environment; foreground elements when useful; time of day; weather or atmosphere when relevant; camera viewpoint; shot type and framing; perspective; depth and spatial arrangement; lighting direction and quality; color palette and mood; materials and texture; and important finishing details. Expression, state, pose, background, environment and composition must be written as normal scene language even when LoRAs are present. ' +
+  'Preserve explicit scene constraints exactly when possible. Resolve conflicts by prioritizing explicit scene constraints, then character identity, then compatible LoRA concepts. Order the positive prompt from subject/identity, to action/state, appearance, pose/expression, clothing, environment/background, composition/camera, lighting, and finishing details. ' +
+  'The negative prompt should be a useful comma-separated list of roughly 20-35 targeted failure terms, including anatomy, hands, facial quality, composition and rendering problems relevant to the requested scene. ' +
+  'Do not output LoRA activation words, angle-bracket LoRA syntax, bracketed LoRA syntax, weights, implementation details, headings, markdown or commentary outside the required JSON object. Return JSON only with positive_prompt, negative_prompt, rationale.';
 
 const defaultDemographicPrompts: DemographicPrompts = {
   safe:'Keep all generated content non-sexual, non-explicit and suitable for general audiences. Avoid nudity and sexualized framing.',
@@ -169,6 +171,20 @@ function isCompatibleLoraUi(
   return explicit || tagged;
 }
 
+function promptNeedsExpansion(pair:PromptPair){
+  const positive=pair.positive_prompt.trim();
+  const words=positive.split(/\s+/).filter(Boolean).length;
+  const clauses=positive.split(',').map(x=>x.trim()).filter(Boolean).length;
+  const sceneSignals=[
+    /pose|posture|standing|sitting|lying|walking|kneeling/i,
+    /expression|smile|frown|serious|calm|happy|sad|angry|confident|gaze|looking/i,
+    /background|environment|scene|room|street|forest|sky|wall|landscape|interior|exterior/i,
+    /lighting|light|shadow|rim light|sunlight|moonlight|neon/i,
+    /camera|close-up|medium shot|wide shot|portrait|three-quarter|full body|perspective/i,
+  ].filter(pattern=>pattern.test(positive)).length;
+  return words < 90 || clauses < 18 || sceneSignals < 4;
+}
+
 function App(){
   const [provider,setProvider]=useState<ProviderKind>('ollama');
   const [llm,setLlm]=useState<LlmSettings>({
@@ -177,8 +193,8 @@ function App(){
     apiKey:'',
     model:'',
     temperature:0.72,
-    maxTokens:4096,
-    contextTokens:16384,
+    maxTokens:8192,
+    contextTokens:32768,
   });
   const [models,setModels]=useState<string[]>([]);
   const [library,setLibrary]=useState<LibrarySnapshot|null>(null);
@@ -510,7 +526,7 @@ function App(){
         'DRESS: ' + prep.scene.dress + '\n' +
         'COMPOSITION: ' + prep.scene.composition + '\n' +
         'EXTRA: ' + (constraints.additional || '(none)') + '\n\n' +
-        'Write a complete, coherent positive prompt that uses the selected LoRAs according to their documented purposes, plus a robust negative prompt.';
+        'Write ONE long, detailed positive prompt as a single comma-separated string. Target 90-160 words and at least 18 meaningful clauses. Do not give a short summary. Explicitly cover subject state/action, pose, hands/arms, head direction, gaze, facial expression, emotional state, clothing/accessories, interaction, setting, background/environment, atmosphere, camera viewpoint, framing, perspective, depth, lighting, color/mood, materials and finishing details. These scene facts must be written directly; do not assume a LoRA will provide them. Write a useful 20-35 item negative prompt. Return JSON only.';
 
       await streamLlm({
         settings:llm,
@@ -521,7 +537,24 @@ function App(){
         flushSync(()=>setStream(streamText.current));
       });
 
-      const rawPair=await apiInvoke<PromptPair>('parse_prompt_pair',{raw:streamText.current});
+      let rawPair=await apiInvoke<PromptPair>('parse_prompt_pair',{raw:streamText.current});
+
+      if(promptNeedsExpansion(rawPair)){
+        streamText.current='';
+        flushSync(()=>setStream(''));
+        const expansionPrompt=
+          'EXPANSION PASS. The previous positive prompt was too short or omitted important scene information. Rewrite it from scratch as ONE long, coherent, single comma-separated positive prompt of 90-160 words with at least 18 meaningful visual clauses. Explicitly include subject identity, visible appearance, current state, action/activity, body pose, hands/arms, head direction, gaze, facial expression, emotional state, clothing/accessories, interaction with surroundings, setting, background/environment, atmosphere, camera viewpoint, shot type, framing, perspective, depth, lighting direction/quality, color/mood, materials/textures and finishing details. Do not rely on any LoRA to provide expression, pose, state, background or composition. Preserve the same character and scene constraints. Also provide a 20-35 item targeted negative prompt. Return JSON only.';
+        await streamLlm({
+          settings:llm,
+          systemPrompt:combinedSystemPrompt,
+          userPrompt:expansionPrompt + '\n\nPREVIOUS JSON:\n' + JSON.stringify(rawPair),
+        },event=>{
+          streamText.current+=event;
+          flushSync(()=>setStream(streamText.current));
+        });
+        rawPair=await apiInvoke<PromptPair>('parse_prompt_pair',{raw:streamText.current});
+      }
+
       const pair=await apiInvoke<PromptPair>('finalize_prompt_pair',{
         req:{promptPair:rawPair,loras:prep.loras},
       });
