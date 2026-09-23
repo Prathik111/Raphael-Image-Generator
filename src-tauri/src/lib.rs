@@ -7,7 +7,7 @@ use axum::{
         IntoResponse,
         Response,
     },
-    routing::{get, post},
+    routing::post,
     Router,
 };
 use base64::Engine;
@@ -1167,7 +1167,7 @@ async fn web_command(
         }
         "parse_prompt_pair"=>{
             let raw=req_value.as_str().ok_or_else(||"raw prompt text is required".to_string())?;
-            serde_json::to_value(parse_prompt_pair(raw)?).map_err(|e|e.to_string())
+            serde_json::to_value(parse_prompt_pair(raw.to_string())?).map_err(|e|e.to_string())
         }
         "finalize_prompt_pair"=>{
             let request=serde_json::from_value::<FinalizePromptRequest>(req_value).map_err(|e|e.to_string())?;
