@@ -76,8 +76,12 @@ function App() {
 
   async function discoverRoots() {
     try {
-      const roots = await invoke<string[]>('discover_raphael_roots');
-      if (roots[0]) setRaphaelRoot(roots[0]);
+      const config = await invoke<{models_root: string | null; db_path: string | null}>('discover_raphael_config');
+      if (config.models_root) setComfyRoot(config.models_root);
+      if (config.db_path) setRaphaelRoot(config.db_path);
+      if (config.models_root) {
+        await scan(config.models_root, config.db_path || undefined);
+      }
     } catch {}
   }
 
@@ -98,13 +102,13 @@ function App() {
     }
   }
 
-  async function scan() {
+  async function scan(rootOverride = comfyRoot, raphaelOverride = raphaelRoot || undefined) {
     setError('');
     setStage('library');
     setStageStatus('library','running');
     try {
       const snap = await invoke<LibrarySnapshot>('scan_library', {
-        req:{comfyRoot, raphaelRoot:raphaelRoot || null},
+        req:{comfyRoot:rootOverride, raphaelRoot:raphaelOverride || null},
       });
       setLibrary(snap);
       if (snap.checkpoints[0]) setSelectedId(snap.checkpoints[0].id);
