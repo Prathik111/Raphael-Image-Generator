@@ -15,7 +15,7 @@ const stages: Array<{key: Stage; label: string}> = [
 
 const emptyConstraints: Constraints = {
   setting:'', pose:'', expression:'', character:'', dress:'', composition:'', additional:'',
-  randomLoRaMin:2, randomLoRaMax:4,
+  randomLoraMin:2, randomLoraMax:4,
 };
 
 function App() {
@@ -331,7 +331,7 @@ function App() {
               )}
             </div>
             <label className="wide-field"><span>ADDITIONAL CONSTRAINTS</span><textarea value={constraints.additional} onChange={e => updateConstraint('additional',e.target.value)} placeholder="Anything the prompt engine must obey…"/></label>
-            <div className="range-row"><label><span>RANDOM LoRA COUNT</span><div className="range-control"><input type="number" min={1} max={8} value={constraints.randomLoRaMin} onChange={e => updateConstraint('randomLoRaMin',Math.max(1,Number(e.target.value)))}/><b>TO</b><input type="number" min={constraints.randomLoRaMin} max={8} value={constraints.randomLoRaMax} onChange={e => updateConstraint('randomLoRaMax',Math.max(constraints.randomLoRaMin,Number(e.target.value)))}/></div></label></div>
+            <div className="range-row"><label><span>RANDOM LoRA COUNT</span><div className="range-control"><input type="number" min={1} max={8} value={constraints.randomLoraMin} onChange={e => updateConstraint('randomLoraMin',Math.max(1,Number(e.target.value)))}/><b>TO</b><input type="number" min={constraints.randomLoraMin} max={8} value={constraints.randomLoraMax} onChange={e => updateConstraint('randomLoraMax',Math.max(constraints.randomLoraMin,Number(e.target.value)))}/></div></label></div>
             {prepared && <div className="stack-preview"><div className="stack-head"><span>SELECTED STACK</span><button onClick={() => void rollStack()}><RefreshCw size={12}/> ROLL AGAIN</button></div>{prepared.loras.map(l => <div className="stack-item" key={l.id}><span className={'stack-dot ' + (l.character ? 'character' : '')}/><div><b>{l.name}</b><small>{l.activationTags.join(', ')}</small></div><strong>{l.weight.toFixed(2)}</strong></div>)}</div>}
           </div>
 
