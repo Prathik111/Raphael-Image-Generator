@@ -721,107 +721,7 @@ function App(){
         <button onClick={()=>void copy(webHost.lanUrl)}><Copy size={12}/> COPY ADDRESS</button>
       </div>}
 
-      {settingsOpen && <div className="settings-overlay" onMouseDown={()=>setSettingsOpen(false)}>
-        <div className="settings-drawer" onMouseDown={e=>e.stopPropagation()}>
-        <div className="drawer-head">
-          <div>
-            <div className="kicker">GENERATION</div>
-            <div className="drawer-title">SETTINGS</div>
-          </div>
-          <button className="icon-btn" onClick={()=>setSettingsOpen(false)}><X size={16}/></button>
-        </div>
 
-        <div className="drawer-scroll">
-          <section className="settings-section">
-            <div className="settings-section-title">MODEL PROVIDER</div>
-            <div className="provider-toggle">
-              <button className={generationDraft.llm.provider==='ollama' ? 'active' : ''} onClick={()=>setGenerationDraft(d=>({...d,llm:{...d.llm,provider:'ollama',baseUrl:'http://127.0.0.1:11434'}}))}>OLLAMA</button>
-              <button className={generationDraft.llm.provider==='openai-compatible' ? 'active' : ''} onClick={()=>setGenerationDraft(d=>({...d,llm:{...d.llm,provider:'openai-compatible',baseUrl:'http://127.0.0.1:8080/v1'}}))}>OPENAI COMPATIBLE</button>
-            </div>
-            <div className="field-grid">
-              <label className="wide-field full-width"><span>BASE URL</span><input value={generationDraft.llm.baseUrl} onChange={e=>setGenerationDraft(d=>({...d,llm:{...d.llm,baseUrl:e.target.value}}))}/></label>
-              <label className="wide-field full-width"><span>API KEY</span><input type="password" value={generationDraft.llm.apiKey} onChange={e=>setGenerationDraft(d=>({...d,llm:{...d.llm,apiKey:e.target.value}}))}/></label>
-              <label className="wide-field full-width"><span>MODEL</span>
-                <select value={generationDraft.llm.model} onChange={e=>setGenerationDraft(d=>({...d,llm:{...d.llm,model:e.target.value}}))}>
-                  <option value="">SELECT MODEL</option>{models.map(model=><option key={model}>{model}</option>)}
-                </select>
-              </label>
-              <button className="secondary-btn full" onClick={()=>void (async()=>{
-                try{
-                  const found=await fetchModels(generationDraft.llm);
-                  setGenerationDraft(d=>({...d,llm:{...d.llm,model:d.llm.model || found[0] || ''}}));
-                }catch(e){setError(String(e));}
-              })()}><RefreshCw size={13}/> GET MODELS</button>
-              <label className="wide-field"><span>TEMPERATURE · {generationDraft.llm.temperature.toFixed(2)}</span><input type="range" min={0} max={2} step={0.05} value={generationDraft.llm.temperature} onChange={e=>setGenerationDraft(d=>({...d,llm:{...d.llm,temperature:Number(e.target.value)}}))}/></label>
-              <label className="wide-field"><span>MAX TOKENS</span><input type="number" min={128} max={16384} value={generationDraft.llm.maxTokens} onChange={e=>setGenerationDraft(d=>({...d,llm:{...d.llm,maxTokens:Math.max(128,Number(e.target.value))}}))}/></label>
-            </div>
-          </section>
-
-          <section className="settings-section">
-            <div className="settings-section-title">SYSTEM PROMPT</div>
-            <textarea className="settings-textarea tall" value={generationDraft.systemPrompt} onChange={e=>setGenerationDraft(d=>({...d,systemPrompt:e.target.value}))}/>
-          </section>
-
-          <section className="settings-section">
-            <div className="settings-section-title">DEMOGRAPHIC POLICY</div>
-            <div className="demographic-grid">
-              {(['safe','suggestive','explicit','no-limits'] as DemographicLevel[]).map(level=>
-                <button key={level} className={'demographic-card ' + (generationDraft.demographic===level ? 'active' : '')} onClick={()=>setGenerationDraft(d=>({...d,demographic:level}))}>
-                  <b>{level.replace('-',' ').toUpperCase()}</b><span>{level==='safe' ? 'General audience' : level==='suggestive' ? 'Mature / suggestive' : level==='explicit' ? 'Adult explicit' : 'No added restriction'}</span>
-                </button>
-              )}
-            </div>
-            <div className="policy-editor-list">
-              {(['safe','suggestive','explicit','no-limits'] as DemographicLevel[]).map(level=>
-                <label className="wide-field" key={level}>
-                  <span>{level.replace('-',' ').toUpperCase()} SYSTEM PROMPT</span>
-                  <textarea className="settings-textarea" value={generationDraft.demographicPrompts[level]} onChange={e=>setGenerationDraft(d=>({...d,demographicPrompts:{...d.demographicPrompts,[level]:e.target.value}}))}/>
-                </label>
-              )}
-            </div>
-          </section>
-
-          <section className="settings-section">
-            <div className="settings-section-title">SCENE</div>
-            <div className="field-grid">
-              {(['setting','pose','expression','character','dress','composition','additional'] as const).map(key=>
-                <label className={'wide-field ' + (key==='additional' ? 'full-width' : '')} key={key}>
-                  <span>{key.replace('_',' ').toUpperCase()}</span>
-                  {key==='additional'
-                    ? <textarea className="settings-textarea" value={generationDraft.constraints[key]} onChange={e=>setGenerationDraft(d=>({...d,constraints:{...d.constraints,[key]:e.target.value}}))} placeholder="Additional prompt constraints"/>
-                    : <input value={generationDraft.constraints[key]} onChange={e=>setGenerationDraft(d=>({...d,constraints:{...d.constraints,[key]:e.target.value}}))} placeholder={key==='character' ? 'Compatible character LoRA' : 'Random if blank'}/>}
-                </label>
-              )}
-            </div>
-          </section>
-
-          <section className="settings-section">
-            <div className="settings-section-title">LORA LIMITS</div>
-            <div className="field-grid">
-              <label className="wide-field"><span>MAX LoRAs</span><input type="number" min={1} max={16} value={generationDraft.maxLoras} onChange={e=>setGenerationDraft(d=>({...d,maxLoras:Math.max(1,Number(e.target.value))}))}/></label>
-              <label className="wide-field"><span>RANDOM MIN</span><input type="number" min={1} max={16} value={generationDraft.randomLoraMin} onChange={e=>setGenerationDraft(d=>({...d,randomLoraMin:Math.max(1,Number(e.target.value))}))}/></label>
-              <label className="wide-field"><span>RANDOM MAX</span><input type="number" min={1} max={16} value={generationDraft.randomLoraMax} onChange={e=>setGenerationDraft(d=>({...d,randomLoraMax:Math.max(1,Number(e.target.value))}))}/></label>
-            </div>
-          </section>
-
-          <section className="settings-section">
-            <div className="settings-section-title">SAMPLING</div>
-            <div className="field-grid">
-              <label className="wide-field"><span>WIDTH</span><input type="number" min={64} step={64} value={generationDraft.width} onChange={e=>setGenerationDraft(d=>({...d,width:Number(e.target.value)}))}/></label>
-              <label className="wide-field"><span>HEIGHT</span><input type="number" min={64} step={64} value={generationDraft.height} onChange={e=>setGenerationDraft(d=>({...d,height:Number(e.target.value)}))}/></label>
-              <label className="wide-field"><span>STEPS</span><input type="number" min={1} max={200} value={generationDraft.steps} onChange={e=>setGenerationDraft(d=>({...d,steps:Number(e.target.value)}))}/></label>
-              <label className="wide-field"><span>CFG</span><input type="number" min={0} step={0.1} value={generationDraft.cfg} onChange={e=>setGenerationDraft(d=>({...d,cfg:Number(e.target.value)}))}/></label>
-              <label className="wide-field full-width"><span>SAMPLER</span><input value={generationDraft.sampler} onChange={e=>setGenerationDraft(d=>({...d,sampler:e.target.value}))}/></label>
-            </div>
-          </section>
-        </div>
-
-        <div className="drawer-foot">
-          <button className="secondary-btn" onClick={()=>setSettingsOpen(false)}>CANCEL</button>
-          <button className="primary-btn" onClick={saveGenerationSettings}>SAVE SETTINGS</button>
-        </div>
-        </div>
-      </div>}
     </aside>
 
     <main className="content">
@@ -1024,6 +924,108 @@ function App(){
         <button className="secondary-btn full" onClick={()=>void scan()}><RefreshCw size={13}/> SCAN LIBRARY</button>
       </div>
     </aside>
+
+          {settingsOpen && <div className="settings-overlay" onMouseDown={()=>setSettingsOpen(false)}>
+        <div className="settings-drawer" onMouseDown={e=>e.stopPropagation()}>
+        <div className="drawer-head">
+          <div>
+            <div className="kicker">GENERATION</div>
+            <div className="drawer-title">SETTINGS</div>
+          </div>
+          <button className="icon-btn" onClick={()=>setSettingsOpen(false)}><X size={16}/></button>
+        </div>
+
+        <div className="drawer-scroll">
+          <section className="settings-section">
+            <div className="settings-section-title">MODEL PROVIDER</div>
+            <div className="provider-toggle">
+              <button className={generationDraft.llm.provider==='ollama' ? 'active' : ''} onClick={()=>setGenerationDraft(d=>({...d,llm:{...d.llm,provider:'ollama',baseUrl:'http://127.0.0.1:11434'}}))}>OLLAMA</button>
+              <button className={generationDraft.llm.provider==='openai-compatible' ? 'active' : ''} onClick={()=>setGenerationDraft(d=>({...d,llm:{...d.llm,provider:'openai-compatible',baseUrl:'http://127.0.0.1:8080/v1'}}))}>OPENAI COMPATIBLE</button>
+            </div>
+            <div className="field-grid">
+              <label className="wide-field full-width"><span>BASE URL</span><input value={generationDraft.llm.baseUrl} onChange={e=>setGenerationDraft(d=>({...d,llm:{...d.llm,baseUrl:e.target.value}}))}/></label>
+              <label className="wide-field full-width"><span>API KEY</span><input type="password" value={generationDraft.llm.apiKey} onChange={e=>setGenerationDraft(d=>({...d,llm:{...d.llm,apiKey:e.target.value}}))}/></label>
+              <label className="wide-field full-width"><span>MODEL</span>
+                <select value={generationDraft.llm.model} onChange={e=>setGenerationDraft(d=>({...d,llm:{...d.llm,model:e.target.value}}))}>
+                  <option value="">SELECT MODEL</option>{models.map(model=><option key={model}>{model}</option>)}
+                </select>
+              </label>
+              <button className="secondary-btn full" onClick={()=>void (async()=>{
+                try{
+                  const found=await fetchModels(generationDraft.llm);
+                  setGenerationDraft(d=>({...d,llm:{...d.llm,model:d.llm.model || found[0] || ''}}));
+                }catch(e){setError(String(e));}
+              })()}><RefreshCw size={13}/> GET MODELS</button>
+              <label className="wide-field"><span>TEMPERATURE · {generationDraft.llm.temperature.toFixed(2)}</span><input type="range" min={0} max={2} step={0.05} value={generationDraft.llm.temperature} onChange={e=>setGenerationDraft(d=>({...d,llm:{...d.llm,temperature:Number(e.target.value)}}))}/></label>
+              <label className="wide-field"><span>MAX TOKENS</span><input type="number" min={128} max={16384} value={generationDraft.llm.maxTokens} onChange={e=>setGenerationDraft(d=>({...d,llm:{...d.llm,maxTokens:Math.max(128,Number(e.target.value))}}))}/></label>
+            </div>
+          </section>
+
+          <section className="settings-section">
+            <div className="settings-section-title">SYSTEM PROMPT</div>
+            <textarea className="settings-textarea tall" value={generationDraft.systemPrompt} onChange={e=>setGenerationDraft(d=>({...d,systemPrompt:e.target.value}))}/>
+          </section>
+
+          <section className="settings-section">
+            <div className="settings-section-title">DEMOGRAPHIC POLICY</div>
+            <div className="demographic-grid">
+              {(['safe','suggestive','explicit','no-limits'] as DemographicLevel[]).map(level=>
+                <button key={level} className={'demographic-card ' + (generationDraft.demographic===level ? 'active' : '')} onClick={()=>setGenerationDraft(d=>({...d,demographic:level}))}>
+                  <b>{level.replace('-',' ').toUpperCase()}</b><span>{level==='safe' ? 'General audience' : level==='suggestive' ? 'Mature / suggestive' : level==='explicit' ? 'Adult explicit' : 'No added restriction'}</span>
+                </button>
+              )}
+            </div>
+            <div className="policy-editor-list">
+              {(['safe','suggestive','explicit','no-limits'] as DemographicLevel[]).map(level=>
+                <label className="wide-field" key={level}>
+                  <span>{level.replace('-',' ').toUpperCase()} SYSTEM PROMPT</span>
+                  <textarea className="settings-textarea" value={generationDraft.demographicPrompts[level]} onChange={e=>setGenerationDraft(d=>({...d,demographicPrompts:{...d.demographicPrompts,[level]:e.target.value}}))}/>
+                </label>
+              )}
+            </div>
+          </section>
+
+          <section className="settings-section">
+            <div className="settings-section-title">SCENE</div>
+            <div className="field-grid">
+              {(['setting','pose','expression','character','dress','composition','additional'] as const).map(key=>
+                <label className={'wide-field ' + (key==='additional' ? 'full-width' : '')} key={key}>
+                  <span>{key.replace('_',' ').toUpperCase()}</span>
+                  {key==='additional'
+                    ? <textarea className="settings-textarea" value={generationDraft.constraints[key]} onChange={e=>setGenerationDraft(d=>({...d,constraints:{...d.constraints,[key]:e.target.value}}))} placeholder="Additional prompt constraints"/>
+                    : <input value={generationDraft.constraints[key]} onChange={e=>setGenerationDraft(d=>({...d,constraints:{...d.constraints,[key]:e.target.value}}))} placeholder={key==='character' ? 'Compatible character LoRA' : 'Random if blank'}/>}
+                </label>
+              )}
+            </div>
+          </section>
+
+          <section className="settings-section">
+            <div className="settings-section-title">LORA LIMITS</div>
+            <div className="field-grid">
+              <label className="wide-field"><span>MAX LoRAs</span><input type="number" min={1} max={16} value={generationDraft.maxLoras} onChange={e=>setGenerationDraft(d=>({...d,maxLoras:Math.max(1,Number(e.target.value))}))}/></label>
+              <label className="wide-field"><span>RANDOM MIN</span><input type="number" min={1} max={16} value={generationDraft.randomLoraMin} onChange={e=>setGenerationDraft(d=>({...d,randomLoraMin:Math.max(1,Number(e.target.value))}))}/></label>
+              <label className="wide-field"><span>RANDOM MAX</span><input type="number" min={1} max={16} value={generationDraft.randomLoraMax} onChange={e=>setGenerationDraft(d=>({...d,randomLoraMax:Math.max(1,Number(e.target.value))}))}/></label>
+            </div>
+          </section>
+
+          <section className="settings-section">
+            <div className="settings-section-title">SAMPLING</div>
+            <div className="field-grid">
+              <label className="wide-field"><span>WIDTH</span><input type="number" min={64} step={64} value={generationDraft.width} onChange={e=>setGenerationDraft(d=>({...d,width:Number(e.target.value)}))}/></label>
+              <label className="wide-field"><span>HEIGHT</span><input type="number" min={64} step={64} value={generationDraft.height} onChange={e=>setGenerationDraft(d=>({...d,height:Number(e.target.value)}))}/></label>
+              <label className="wide-field"><span>STEPS</span><input type="number" min={1} max={200} value={generationDraft.steps} onChange={e=>setGenerationDraft(d=>({...d,steps:Number(e.target.value)}))}/></label>
+              <label className="wide-field"><span>CFG</span><input type="number" min={0} step={0.1} value={generationDraft.cfg} onChange={e=>setGenerationDraft(d=>({...d,cfg:Number(e.target.value)}))}/></label>
+              <label className="wide-field full-width"><span>SAMPLER</span><input value={generationDraft.sampler} onChange={e=>setGenerationDraft(d=>({...d,sampler:e.target.value}))}/></label>
+            </div>
+          </section>
+        </div>
+
+        <div className="drawer-foot">
+          <button className="secondary-btn" onClick={()=>setSettingsOpen(false)}>CANCEL</button>
+          <button className="primary-btn" onClick={saveGenerationSettings}>SAVE SETTINGS</button>
+        </div>
+        </div>
+      </div>}
   </div>
 }
 
