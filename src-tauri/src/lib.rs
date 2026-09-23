@@ -806,8 +806,16 @@ fn comfy_relative_model_name(path: &str, folder: &str, fallback: &str) -> String
     if let Some(models_index) = lower.find("/models/") {
         let mut relative = normalized[models_index + "/models/".len()..].to_string();
         let folder_prefix = format!("{}/", folder);
-        if relative.to_lowercase().starts_with(&folder_prefix) {
+        let relative_lower = relative.to_lowercase();
+        if relative_lower.starts_with(&folder_prefix) {
             relative = relative[folder_prefix.len()..].to_string();
+        } else if folder.eq_ignore_ascii_case("unet")
+            && relative_lower.starts_with("diffusion_models/")
+        {
+            // Newer ComfyUI layouts may expose UNETLoader files from
+            // models/diffusion_models, but the loader expects the path
+            // relative to that directory (e.g. anima\\model.safetensors).
+            relative = relative["diffusion_models/".len()..].to_string();
         }
         if !relative.is_empty() {
             return relative.replace('/', "\\");
@@ -1058,6 +1066,18 @@ mod tests {
         assert_eq!(
             comfy_relative_model_name(
                 "D:/ComfyUI/models/anima/chosenIrisesMix_v20Anima.safetensors",
+                "unet",
+                "fallback.safetensors"
+            ),
+            "anima\\chosenIrisesMix_v20Anima.safetensors"
+        );
+    }
+
+    #[test]
+    fn comfy_relative_model_name_strips_diffusion_models_prefix_for_unet() {
+        assert_eq!(
+            comfy_relative_model_name(
+                "D:/ComfyUI/models/diffusion_models/anima/chosenIrisesMix_v20Anima.safetensors",
                 "unet",
                 "fallback.safetensors"
             ),
