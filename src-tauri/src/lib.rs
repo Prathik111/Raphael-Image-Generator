@@ -5,6 +5,7 @@ use rand::{prelude::IndexedRandom, seq::SliceRandom, Rng};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{fs, path::{Path, PathBuf}, sync::Arc, time::{SystemTime, UNIX_EPOCH}};
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::Mutex;
 use walkdir::WalkDir;
@@ -12,7 +13,7 @@ use walkdir::WalkDir;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ModelInfo {
-    id: String, name: String, kind: String, path: String, size: u64,
+    id: String, name: String, #[serde(rename = "type")] kind: String, path: String, size: u64,
     #[serde(default)] base_model: Option<String>,
     #[serde(default)] tags: Vec<String>,
     #[serde(default)] activation_tags: Vec<String>,
@@ -165,23 +166,177 @@ fn scan_cache(root: &Path) -> Vec<ModelInfo> {
     out
 }
 
-fn scan_disk(root: &Path) -> (Vec<ModelInfo>,Vec<ModelInfo>) {
-    let mut cps=Vec::new(); let mut ls=Vec::new();
-    if !root.exists() { return (cps,ls); }
-    for entry in WalkDir::new(root).follow_links(false).into_iter().filter_map(Result::ok) {
-        if !entry.file_type().is_file() { continue; }
-        let ext=entry.path().extension().and_then(|x|x.to_str()).unwrap_or("").to_lowercase();
-        if !matches!(ext.as_str(),"safetensors"|"ckpt"|"pt"|"bin") { continue; }
-        let rel=norm(&entry.path().strip_prefix(root).unwrap_or(entry.path()).to_string_lossy());
-        let kind=if rel.contains("lora"){"lora"}else if rel.contains("checkpoint")||rel.contains("checkpoints"){"checkpoint"}else{continue};
-        let size=entry.metadata().map(|m|m.len()).unwrap_or(0);
-        let name=entry.path().file_stem().and_then(|x|x.to_str()).unwrap_or("model").to_string();
-        let m=ModelInfo{id:"disk-".to_string()+&norm(&entry.path().to_string_lossy()),name,kind:kind.into(),
-            path:entry.path().to_string_lossy().to_string(),size,base_model:None,tags:vec![],activation_tags:vec![],
-            character:false,thumbnail:None,source:"comfyui".into(),cache_name:None,cache_description:None};
-        if kind=="checkpoint"{cps.push(m)}else{ls.push(m)}
+
+fn is_path_under(root: &Path, candidate: &Path) -> bool {
+    let root_abs = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let candidate_abs = candidate.canonicalize().unwrap_or_else(|_| candidate.to_path_buf());
+    if candidate_abs.starts_with(&root_abs) {
+        return true;
     }
-    (cps,ls)
+    let root_s = root_abs.to_string_lossy().replace('\\', "/").to_lowercase();
+    let candidate_s = candidate_abs.to_string_lossy().replace('\\', "/").to_lowercase();
+    candidate_s == root_s || candidate_s.starts_with(&(root_s + "/"))
+}
+
+fn manager_db_candidates(extra_root: Option<&str>) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Some(value) = extra_root.map(str::trim).filter(|x| !x.is_empty()) {
+        let p = PathBuf::from(value);
+        if p.is_file() && p.file_name().and_then(|x| x.to_str()).map(|x| x.eq_ignore_ascii_case("raphael.db")).unwrap_or(false) {
+            out.push(p);
+        } else if p.is_dir() {
+            out.push(p.join("raphael.db"));
+        }
+    }
+    for env_name in ["APPDATA", "LOCALAPPDATA"] {
+        if let Ok(base) = std::env::var(env_name) {
+            let base = PathBuf::from(base);
+            for rel in [
+                PathBuf::from("com.raphael.modelmanager").join("raphael.db"),
+                PathBuf::from("Raphael Model Manager").join("raphael.db"),
+                PathBuf::from("Raphael-Model-Manager").join("raphael.db"),
+            ] {
+                out.push(base.join(rel));
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn manager_model_type(raw: &str) -> Option<&'static str> {
+    match raw {
+        "Checkpoint" => Some("checkpoint"),
+        "LoRA" => Some("lora"),
+        "checkpoint" | "lora" => Some(raw),
+        _ => None,
+    }
+}
+
+fn load_manager_models(db_path: &Path, comfy_root: &Path) -> Result<(Vec<ModelInfo>, Vec<ModelInfo>), String> {
+    if !db_path.is_file() {
+        return Ok((vec![], vec![]));
+    }
+    let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|e| format!("Could not open Raphael Model Manager database {}: {}", db_path.display(), e))?;
+
+    let mut stmt = conn.prepare(
+        "SELECT id,path,filename,model_type,size_bytes,base_model,description,tags_json,activation_json,thumbnail_path,civitai_name,version_name
+         FROM models"
+    ).map_err(|e| format!("Raphael database schema error: {}", e))?;
+
+    let mut checkpoints = Vec::new();
+    let mut loras = Vec::new();
+    let rows = stmt.query_map([], |row| {
+        let id: i64 = row.get(0)?;
+        let path: String = row.get(1)?;
+        let filename: String = row.get(2)?;
+        let model_type: String = row.get(3)?;
+        let size_bytes: i64 = row.get(4)?;
+        let base_model: Option<String> = row.get(5)?;
+        let description: Option<String> = row.get(6)?;
+        let tags_json: String = row.get(7)?;
+        let activation_json: String = row.get(8)?;
+        let thumbnail_path: Option<String> = row.get(9)?;
+        let civitai_name: Option<String> = row.get(10)?;
+        let version_name: Option<String> = row.get(11)?;
+        Ok((id,path,filename,model_type,size_bytes,base_model,description,tags_json,activation_json,thumbnail_path,civitai_name,version_name))
+    }).map_err(|e| format!("Could not read Raphael model records: {}", e))?;
+
+    for row in rows {
+        let (id,path,filename,model_type,size_bytes,base_model,description,tags_json,activation_json,thumbnail_path,civitai_name,version_name) =
+            row.map_err(|e| format!("Could not decode Raphael model record: {}", e))?;
+        let Some(kind) = manager_model_type(&model_type) else { continue };
+        let model_path = PathBuf::from(&path);
+        if !model_path.exists() || !is_path_under(comfy_root, &model_path) {
+            continue;
+        }
+        let mut tags: Vec<String> = serde_json::from_str(&tags_json).unwrap_or_default();
+        let activation_tags: Vec<String> = serde_json::from_str(&activation_json).unwrap_or_default();
+        if tags.is_empty() && kind == "lora" && !activation_tags.is_empty() {
+            tags = activation_tags.clone();
+        }
+        let thumbnail = thumbnail_path
+            .map(PathBuf::from)
+            .filter(|p| p.is_file())
+            .map(|p| p.to_string_lossy().to_string());
+
+        let model = ModelInfo {
+            id: format!("raphael-{}", id),
+            name: civitai_name.or(version_name).unwrap_or(filename),
+            kind: kind.to_string(),
+            path: model_path.to_string_lossy().to_string(),
+            size: size_bytes.max(0) as u64,
+            base_model,
+            tags,
+            activation_tags,
+            character: is_character(&tags),
+            thumbnail,
+            source: "raphael-model-manager".into(),
+            cache_name: None,
+            cache_description: description,
+        };
+        if kind == "checkpoint" {
+            checkpoints.push(model);
+        } else {
+            loras.push(model);
+        }
+    }
+
+    Ok((checkpoints, loras))
+}
+
+fn file_type_from_path(path: &Path, root: &Path) -> &'static str {
+    let rel = path.strip_prefix(root).unwrap_or(path);
+    let first = rel.components().next()
+        .and_then(|c| c.as_os_str().to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match first.as_str() {
+        "checkpoints" | "checkpoint" | "diffusion_models" | "unet" | "unets" => "checkpoint",
+        "loras" | "lora" | "lycoris" => "lora",
+        _ => "",
+    }
+}
+
+fn is_model_file(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|x| x.to_str()).unwrap_or("").to_ascii_lowercase().as_str(),
+        "safetensors" | "ckpt" | "pt" | "pth" | "bin" | "gguf" | "onnx"
+    )
+}
+
+fn scan_disk(root: &Path) -> (Vec<ModelInfo>,Vec<ModelInfo>) {
+    let mut cps = Vec::new();
+    let mut ls = Vec::new();
+    if !root.exists() { return (cps, ls); }
+
+    for entry in WalkDir::new(root).follow_links(false).into_iter().filter_map(Result::ok) {
+        if !entry.file_type().is_file() || !is_model_file(entry.path()) { continue; }
+        let kind = file_type_from_path(entry.path(), root);
+        if kind.is_empty() { continue; }
+
+        let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+        let name = entry.path().file_stem().and_then(|x| x.to_str()).unwrap_or("model").to_string();
+        let model = ModelInfo {
+            id: "disk-".to_string() + &norm(&entry.path().to_string_lossy()),
+            name,
+            kind: kind.into(),
+            path: entry.path().to_string_lossy().to_string(),
+            size,
+            base_model: None,
+            tags: vec![],
+            activation_tags: vec![],
+            character: false,
+            thumbnail: None,
+            source: "comfyui".into(),
+            cache_name: None,
+            cache_description: None,
+        };
+        if kind == "checkpoint" { cps.push(model); } else { ls.push(model); }
+    }
+    (cps, ls)
 }
 
 fn merge_one(d:&mut ModelInfo,c:&ModelInfo){
@@ -224,15 +379,47 @@ fn discover_raphael_roots()->Vec<String>{
 
 #[tauri::command]
 fn scan_library(req:ScanRequest)->Result<LibrarySnapshot,String>{
-    let (mut cps,mut ls)=scan_disk(Path::new(&req.comfy_root)); let mut roots=vec![req.comfy_root.clone()];
-    if let Some(rr)=req.raphael_root.as_deref().filter(|x|!x.trim().is_empty()){
-        let cache=scan_cache(Path::new(rr)); roots.push(rr.to_string());
-        let cp:Vec<_>=cache.iter().filter(|x|x.kind=="checkpoint").cloned().collect();
-        let lr:Vec<_>=cache.iter().filter(|x|x.kind=="lora").cloned().collect();
-        merge(&mut cps,&cp); merge(&mut ls,&lr);
+    let root = Path::new(&req.comfy_root);
+    if !root.is_dir() {
+        return Err(format!("ComfyUI models root is not a folder: {}", req.comfy_root));
     }
-    cps.sort_by_key(|x|x.name.to_lowercase()); ls.sort_by_key(|x|x.name.to_lowercase());
+
+    let (mut cps, mut ls) = scan_disk(root);
+    let mut roots = vec![req.comfy_root.clone()];
+    let mut manager_loaded = false;
+
+    for db in manager_db_candidates(req.raphael_root.as_deref()) {
+        match load_manager_models(&db, root) {
+            Ok((manager_cps, manager_loras)) if !manager_cps.is_empty() || !manager_loras.is_empty() => {
+                cps = manager_cps;
+                ls = manager_loras;
+                roots.push(db.to_string_lossy().to_string());
+                manager_loaded = true;
+                break;
+            }
+            Ok(_) => {}
+            Err(_) => {}
+        }
+    }
+
+    if !manager_loaded {
+        if let Some(rr)=req.raphael_root.as_deref().filter(|x|!x.trim().is_empty()) {
+            let cache=scan_cache(Path::new(rr));
+            roots.push(rr.to_string());
+            let cp:Vec<_>=cache.iter().filter(|x|x.kind=="checkpoint").cloned().collect();
+            let lr:Vec<_>=cache.iter().filter(|x|x.kind=="lora").cloned().collect();
+            merge(&mut cps,&cp);
+            merge(&mut ls,&lr);
+        }
+    }
+
+    cps.sort_by_key(|x| x.name.to_lowercase());
+    ls.sort_by_key(|x| x.name.to_lowercase());
+
     let mut warnings=Vec::new();
+    if !manager_loaded {
+        warnings.push("Raphael Model Manager database was not found; using ComfyUI filesystem scan. Start/scan Raphael Model Manager or configure its raphael.db path for cached thumbnails, base metadata, tags and activation prompts.".into());
+    }
     if cps.is_empty(){warnings.push("No checkpoints found under the selected ComfyUI models root.".into());}
     if ls.is_empty(){warnings.push("No LoRAs found under the selected ComfyUI models root.".into());}
     Ok(LibrarySnapshot{checkpoints:cps,loras:ls,source_roots:roots,warnings})
