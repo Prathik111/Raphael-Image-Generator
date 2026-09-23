@@ -273,7 +273,13 @@ function App() {
         },
       });
       const injected = await invoke<Record<string,unknown>>('inject_prompts', {
-        req:{workflow, positivePrompt:pair.positive_prompt, negativePrompt:pair.negative_prompt},
+        req:{
+          workflow,
+          positivePrompt:pair.positive_prompt,
+          negativePrompt:pair.negative_prompt,
+          positive_prompt:pair.positive_prompt,
+          negative_prompt:pair.negative_prompt,
+        },
       });
       setStageStatus('workflow','done');
 
