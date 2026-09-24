@@ -164,6 +164,68 @@ struct ComfyGenerationResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct HistoryRecord { id: String, timestamp: String, payload: Value }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct HostSettings {
+    llm: LlmSettings,
+    system_prompt: String,
+    demographic: String,
+    demographic_prompts: Value,
+    max_loras: u32,
+    random_lora_min: u32,
+    random_lora_max: u32,
+    constraints: Value,
+    width: u32,
+    height: u32,
+    steps: u32,
+    cfg: f32,
+    sampler: String,
+    comfy_root: String,
+    raphael_root: String,
+    comfy_url: String,
+    selected_id: String,
+    selected_lora_ids: Vec<String>,
+    manual_lora_ids: Vec<String>,
+    revision: u64,
+}
+
+fn default_host_settings() -> HostSettings {
+    HostSettings {
+        llm: LlmSettings {
+            provider: "ollama".into(),
+            base_url: "http://127.0.0.1:11434".into(),
+            api_key: String::new(),
+            model: String::new(),
+            temperature: 0.72,
+            max_tokens: 8192,
+            context_tokens: 32768,
+        },
+        system_prompt: String::new(),
+        demographic: "safe".into(),
+        demographic_prompts: json!({}),
+        max_loras: 4,
+        random_lora_min: 2,
+        random_lora_max: 4,
+        constraints: json!({
+            "setting":"", "pose":"", "expression":"", "character":"",
+            "dress":"", "composition":"", "additional":"",
+            "randomLoraMin":2, "randomLoraMax":4
+        }),
+        width: 1024,
+        height: 1024,
+        steps: 28,
+        cfg: 6.5,
+        sampler: "euler".into(),
+        comfy_root: String::new(),
+        raphael_root: String::new(),
+        comfy_url: "http://127.0.0.1:8188".into(),
+        selected_id: String::new(),
+        selected_lora_ids: Vec::new(),
+        manual_lora_ids: Vec::new(),
+        revision: 0,
+    }
+}
+
 struct WebHostRuntime {
     port: u16,
     lan_url: String,
@@ -448,6 +510,45 @@ fn pick_folder()->Result<PickResult,String>{
     Ok(PickResult{path:rfd::FileDialog::new().pick_folder().map(|x|x.to_string_lossy().to_string())})
 }
 
+fn settings_path(app:&AppHandle)->Result<PathBuf,String>{
+    let dir=app.path().app_data_dir().map_err(|e|e.to_string())?;
+    fs::create_dir_all(&dir).map_err(|e|e.to_string())?;
+    Ok(dir.join("raphael-settings.json"))
+}
+
+fn load_host_settings(app:&AppHandle)->Result<HostSettings,String>{
+    let path=settings_path(app)?;
+    if path.exists(){
+        return serde_json::from_slice(&fs::read(path).map_err(|e|e.to_string())?)
+            .map_err(|e|format!("Invalid Raphael settings file: {}",e));
+    }
+
+    let mut settings=default_host_settings();
+    let discovered=discover_raphael_config();
+    if let Some(root)=discovered.models_root { settings.comfy_root=root; }
+    if let Some(db)=discovered.db_path { settings.raphael_root=db; }
+    Ok(settings)
+}
+
+fn save_host_settings(app:&AppHandle,mut settings:HostSettings)->Result<HostSettings,String>{
+    let path=settings_path(app)?;
+    settings.revision=SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+    let bytes=serde_json::to_vec_pretty(&settings).map_err(|e|e.to_string())?;
+    fs::write(&path,bytes).map_err(|e|e.to_string())?;
+    Ok(settings)
+}
+
+#[tauri::command]
+fn load_settings(app:AppHandle)->Result<HostSettings,String>{
+    let settings=load_host_settings(&app)?;
+    if settings.revision==0 { save_host_settings(&app,settings) } else { Ok(settings) }
+}
+
+#[tauri::command]
+fn save_settings(app:AppHandle,settings:HostSettings)->Result<HostSettings,String>{
+    save_host_settings(&app,settings)
+}
+
 #[derive(Debug, Serialize)]
 struct RaphaelConfig {
     models_root: Option<String>,
@@ -531,7 +632,8 @@ fn scan_library(req:ScanRequest)->Result<LibrarySnapshot,String>{
 }
 
 #[tauri::command]
-async fn list_provider_models(settings:LlmSettings)->Result<Vec<String>,String>{
+async fn list_provider_models(app:AppHandle)->Result<Vec<String>,String>{
+    let settings=load_host_settings(&app)?.llm;
     let client=reqwest::Client::new(); let base=base_url(&settings.base_url);
     let (url,need_auth)=if settings.provider=="ollama"{(format!("{}/api/tags",base),false)}else{(if base.ends_with("/v1"){format!("{}/models",base)}else{format!("{}/v1/models",base)},true)};
     let mut request=client.get(url); if need_auth&&!settings.api_key.is_empty(){request=request.bearer_auth(settings.api_key);}
@@ -622,9 +724,11 @@ fn prepare_generation(req:PrepareRequest)->Result<PreparedGeneration,String>{
 #[tauri::command]
 async fn stream_llm(
     state:tauri::State<'_,AppState>,
-    req:LlmRequest,
+    app:AppHandle,
+    mut req:LlmRequest,
     on_event:Channel<LlmDelta>,
 )->Result<(),String>{
+    req.settings=load_host_settings(&app)?.llm;
     {
         let mut busy=state.active_stream.lock().await;
         if *busy{return Err("An LLM stream is already active.".into())}
@@ -1062,7 +1166,8 @@ fn inject_prompts(req:InjectRequest)->Result<Value,String>{
 }
 
 #[tauri::command]
-async fn submit_to_comfy(req:SubmitRequest)->Result<Value,String>{
+async fn submit_to_comfy(app:AppHandle,mut req:SubmitRequest)->Result<Value,String>{
+    req.comfy_url=load_host_settings(&app)?.comfy_url;
     let response=reqwest::Client::new().post(format!("{}/prompt",base_url(&req.comfy_url))).json(&json!({"prompt":req.workflow,"client_id":"raphael-prompt-forge"})).send().await.map_err(|e|e.to_string())?;
     let status=response.status(); let text=response.text().await.unwrap_or_default();
     if !status.is_success(){return Err(format!("ComfyUI returned HTTP {}: {}",status,text))}
@@ -1179,9 +1284,11 @@ where F:FnMut(ComfyProgress)->Result<(),String> + Send
 
 #[tauri::command]
 async fn monitor_comfy_generation(
-    req:MonitorComfyRequest,
+    app:AppHandle,
+    mut req:MonitorComfyRequest,
     on_event:Channel<ComfyProgress>,
 )->Result<ComfyGenerationResult,String>{
+    req.comfy_url=load_host_settings(&app)?.comfy_url;
     monitor_comfy_generation_inner(req, |progress| {
         on_event.send(progress).map_err(|e|format!("ComfyUI channel closed: {}",e))
     }).await
@@ -1218,10 +1325,10 @@ async fn web_command(
     AxumJson(body):AxumJson<Value>,
 )->Response{
     if command=="stream_llm" {
-        return web_stream_llm(AxumJson(body)).await.into_response();
+        return web_stream_llm(AxumJson(body),state.app.clone()).await.into_response();
     }
     if command=="monitor_comfy_generation" {
-        return web_monitor_comfy(AxumJson(body)).await.into_response();
+        return web_monitor_comfy(AxumJson(body),state.app.clone()).await.into_response();
     }
 
     let req_value=body.get("req").cloned().unwrap_or_else(||body.clone());
@@ -1229,9 +1336,14 @@ async fn web_command(
         match command.as_str(){
         "discover_raphael_config"=>serde_json::to_value(discover_raphael_config()).map_err(|e|e.to_string()),
         "discover_raphael_roots"=>serde_json::to_value(discover_raphael_roots()).map_err(|e|e.to_string()),
+        "load_settings"=>serde_json::to_value(load_settings(state.app.clone())?).map_err(|e|e.to_string()),
+        "save_settings"=>{
+            let settings_value=body.get("settings").cloned().unwrap_or(req_value);
+            let settings=serde_json::from_value::<HostSettings>(settings_value).map_err(|e|e.to_string())?;
+            serde_json::to_value(save_settings(state.app.clone(),settings)?).map_err(|e|e.to_string())
+        }
         "list_provider_models"=>{
-            let settings=serde_json::from_value::<LlmSettings>(req_value).map_err(|e|e.to_string())?;
-            let models=list_provider_models(settings).await?;
+            let models=list_provider_models(state.app.clone()).await?;
             serde_json::to_value(models).map_err(|e|e.to_string())
         }
         "scan_library"=>{
@@ -1260,7 +1372,7 @@ async fn web_command(
         }
         "submit_to_comfy"=>{
             let request=serde_json::from_value::<SubmitRequest>(req_value).map_err(|e|e.to_string())?;
-            serde_json::to_value(submit_to_comfy(request).await?).map_err(|e|e.to_string())
+            serde_json::to_value(submit_to_comfy(state.app.clone(),request).await?).map_err(|e|e.to_string())
         }
         "load_history"=>serde_json::to_value(load_history(state.app.clone())?).map_err(|e|e.to_string()),
         "append_history"=>{
@@ -1281,8 +1393,15 @@ async fn web_command(
 
 async fn web_stream_llm(
     AxumJson(body):AxumJson<Value>,
+    app:AppHandle,
 )->Sse<impl Stream<Item=Result<Event,std::convert::Infallible>>>{
-    let req:Result<LlmRequest,String>=serde_json::from_value(body.get("req").cloned().unwrap_or(body.clone())).map_err(|e|e.to_string());
+    let mut req:Result<LlmRequest,String>=serde_json::from_value(body.get("req").cloned().unwrap_or(body.clone())).map_err(|e|e.to_string());
+    if req.is_ok() {
+        match load_host_settings(&app) {
+            Ok(settings)=>{ if let Ok(request)=req.as_mut(){ request.settings=settings.llm; } },
+            Err(e)=>{ req=Err(e); }
+        }
+    }
     let (tx,rx)=tokio::sync::mpsc::unbounded_channel::<Result<Event,std::convert::Infallible>>();
     tokio::spawn(async move{
         match req{
@@ -1311,8 +1430,15 @@ async fn web_stream_llm(
 
 async fn web_monitor_comfy(
     AxumJson(body):AxumJson<Value>,
+    app:AppHandle,
 )->Sse<impl Stream<Item=Result<Event,std::convert::Infallible>>>{
-    let req:Result<MonitorComfyRequest,String>=serde_json::from_value(body.get("req").cloned().unwrap_or(body.clone())).map_err(|e|e.to_string());
+    let mut req:Result<MonitorComfyRequest,String>=serde_json::from_value(body.get("req").cloned().unwrap_or(body.clone())).map_err(|e|e.to_string());
+    if req.is_ok() {
+        match load_host_settings(&app) {
+            Ok(settings)=>{ if let Ok(request)=req.as_mut(){ request.comfy_url=settings.comfy_url; } },
+            Err(e)=>{ req=Err(e); }
+        }
+    }
     let (tx,rx)=tokio::sync::mpsc::unbounded_channel::<Result<Event,std::convert::Infallible>>();
     tokio::spawn(async move{
         match req{
@@ -1404,7 +1530,7 @@ pub fn run(){
     tauri::Builder::default()
         .manage(AppState{active_stream:Arc::new(Mutex::new(false)),web_host:Arc::new(Mutex::new(None))})
         .invoke_handler(tauri::generate_handler![
-            pick_folder,discover_raphael_config,discover_raphael_roots,scan_library,list_provider_models,
+            pick_folder,discover_raphael_config,discover_raphael_roots,load_settings,save_settings,scan_library,list_provider_models,
             prepare_generation,stream_llm,parse_prompt_pair,finalize_prompt_pair,build_workflow,inject_prompts,
             submit_to_comfy,monitor_comfy_generation,load_history,append_history,path_to_data_url,start_web_host,stop_web_host
         ])
