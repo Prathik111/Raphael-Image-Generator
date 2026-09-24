@@ -28,6 +28,18 @@ Production build:
 npm run tauri:build
 ```
 
+## LAN web host
+
+When WEB HOST is enabled from the Tauri desktop app, the desktop PC is the Raphael host. LAN browsers are clients of that host and do not need Ollama or ComfyUI installed locally.
+
+- Ollama model discovery and LLM generation run on the host PC.
+- ComfyUI submission and generation monitoring run on the host PC.
+- Generation settings, provider settings, model selection, scene settings, LoRA selection, model roots and ComfyUI URL are persisted on the host and synchronized to connected clients.
+- Generation history is already stored on the host and is shared by LAN clients.
+- Clients poll the host settings revision so changes made on the desktop or another LAN client propagate automatically.
+
+The LAN client must use the host web URL shown by WEB HOST. A LAN client does not use its own localhost:11434 or localhost:8188 for generation.
+
 ## Setup
 
 Open **SETTINGS** first:
