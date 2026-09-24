@@ -6,7 +6,7 @@ import {
   RefreshCw, Search, Settings2, Sparkles, Terminal, WandSparkles, X
 } from 'lucide-react';
 import type {
-  Constraints, DemographicLevel, DemographicPrompts, GenerationRecord, GenerationSettings, LibrarySnapshot,
+  Constraints, DemographicLevel, DemographicPrompts, GenerationRecord, GenerationSettings, HostSettings, LibrarySnapshot,
   LlmSettings, PreparedGeneration, PromptPair, ProviderKind, WebHostInfo
 } from './types';
 
@@ -256,6 +256,7 @@ function App(){
   const [webHost,setWebHost]=useState<WebHostInfo|null>(null);
   const [webHostBusy,setWebHostBusy]=useState(false);
   const [webHostError,setWebHostError]=useState('');
+  const [settingsRevision,setSettingsRevision]=useState(0);
 
   const [comfyProgress,setComfyProgress]=useState(0);
   const [comfyCurrentStep,setComfyCurrentStep]=useState(0);
@@ -298,10 +299,61 @@ function App(){
   },[compatibleLoras,loraSearch]);
 
   useEffect(()=>{
-    void loadHistory();
-    void refreshModels();
-    void discoverRoots();
+    void (async()=>{
+      try{
+        const host=await loadHostSettings();
+        await loadHistory();
+        const found=await fetchModels(host.llm);
+        const hydrated=await loadHostSettings();
+        const selectedModel=hydrated.llm.model || found[0] || '';
+        const withModel=selectedModel && !hydrated.llm.model
+          ? {...hydrated,llm:{...hydrated.llm,model:selectedModel}}
+          : hydrated;
+        applyHostSettings(withModel);
+        await scan(
+          withModel.comfyRoot,
+          withModel.raphaelRoot || undefined,
+          {
+            selectedId:withModel.selectedId,
+            selectedLoraIds:withModel.selectedLoraIds,
+            manualLoraIds:withModel.manualLoraIds,
+          },
+          false,
+        );
+      }catch(e){
+        setError(String(e));
+      }
+    })();
   },[]);
+
+  useEffect(()=>{
+    const timer=window.setInterval(()=>{
+      if(settingsOpen || busy) return;
+      void (async()=>{
+        try{
+          const next=await apiInvoke<HostSettings>('load_settings');
+          if(!next || next.revision===settingsRevision) return;
+          const providerChanged=next.llm.provider!==llm.provider || next.llm.baseUrl!==llm.baseUrl;
+          const rootsChanged=next.comfyRoot!==comfyRoot || next.raphaelRoot!==raphaelRoot;
+          applyHostSettings(next);
+          if(providerChanged) await fetchModels(next.llm);
+          if(rootsChanged && next.comfyRoot){
+            await scan(
+              next.comfyRoot,
+              next.raphaelRoot || undefined,
+              {
+                selectedId:next.selectedId,
+                selectedLoraIds:next.selectedLoraIds,
+                manualLoraIds:next.manualLoraIds,
+              },
+              false,
+            );
+          }
+        }catch{}
+      })();
+    },1500);
+    return ()=>window.clearInterval(timer);
+  },[settingsOpen,busy,settingsRevision,comfyRoot,raphaelRoot,llm.provider,llm.baseUrl]);
 
   useEffect(()=>{
     if(!library) return;
@@ -316,6 +368,90 @@ function App(){
   const setStageStatus=(key:Stage,value:Status)=>{
     setStatus(x=>({...x,[key]:value}));
   };
+
+  function buildHostSettings(overrides:Partial<HostSettings> = {}):HostSettings{
+    return {
+      llm,
+      systemPrompt,
+      demographic,
+      demographicPrompts:{...demographicPrompts},
+      maxLoras,
+      randomLoraMin:constraints.randomLoraMin,
+      randomLoraMax:constraints.randomLoraMax,
+      constraints:{...constraints},
+      width,
+      height,
+      steps,
+      cfg,
+      sampler,
+      comfyRoot,
+      raphaelRoot,
+      comfyUrl,
+      selectedId,
+      selectedLoraIds:[...selectedLoraIds],
+      manualLoraIds:[...manualLoraIds],
+      revision:settingsRevision,
+      ...overrides,
+    };
+  }
+
+  function applyHostSettings(next:HostSettings){
+    const nextLlm={...llm,...next.llm};
+    const nextConstraints={
+      ...emptyConstraints,
+      ...next.constraints,
+      randomLoraMin:Math.max(1,next.randomLoraMin || next.constraints.randomLoraMin || 2),
+      randomLoraMax:Math.max(1,next.randomLoraMax || next.constraints.randomLoraMax || 4),
+    };
+    const nextDemographicPrompts={...defaultDemographicPrompts,...next.demographicPrompts};
+    const nextSystemPrompt=next.systemPrompt || defaultSystemPrompt;
+    setProvider(nextLlm.provider);
+    setLlm(nextLlm);
+    setConstraints(nextConstraints);
+    setSystemPrompt(nextSystemPrompt);
+    setDemographic(next.demographic as DemographicLevel);
+    setDemographicPrompts(nextDemographicPrompts);
+    setMaxLoras(Math.max(1,Math.min(16,next.maxLoras || 4)));
+    setWidth(Math.max(64,next.width || 1024));
+    setHeight(Math.max(64,next.height || 1024));
+    setSteps(Math.max(1,next.steps || 28));
+    setCfg(Math.max(0,next.cfg ?? 6.5));
+    setSampler(next.sampler || 'euler');
+    setComfyRoot(next.comfyRoot || comfyRoot);
+    setRaphaelRoot(next.raphaelRoot || '');
+    setComfyUrl(next.comfyUrl || 'http://127.0.0.1:8188');
+    setSelectedId(next.selectedId || '');
+    setSelectedLoraIds([...(next.selectedLoraIds || [])]);
+    setManualLoraIds([...(next.manualLoraIds || [])]);
+    setSettingsRevision(next.revision || 0);
+    setGenerationDraft({
+      llm:nextLlm,
+      systemPrompt:nextSystemPrompt,
+      demographic:next.demographic as DemographicLevel,
+      demographicPrompts:nextDemographicPrompts,
+      maxLoras:Math.max(1,Math.min(16,next.maxLoras || 4)),
+      randomLoraMin:nextConstraints.randomLoraMin,
+      randomLoraMax:nextConstraints.randomLoraMax,
+      constraints:nextConstraints,
+      width:Math.max(64,next.width || 1024),
+      height:Math.max(64,next.height || 1024),
+      steps:Math.max(1,next.steps || 28),
+      cfg:Math.max(0,next.cfg ?? 6.5),
+      sampler:next.sampler || 'euler',
+    });
+  }
+
+  async function loadHostSettings(){
+    const next=await apiInvoke<HostSettings>('load_settings');
+    applyHostSettings(next);
+    return next;
+  }
+
+  async function persistHostSettings(overrides:Partial<HostSettings> = {}){
+    const saved=await apiInvoke<HostSettings>('save_settings',{settings:buildHostSettings(overrides)});
+    applyHostSettings(saved);
+    return saved;
+  }
 
   async function discoverRoots(){
     try{
@@ -333,8 +469,8 @@ function App(){
     }catch{}
   }
 
-  async function fetchModels(settings:LlmSettings){
-    const found=await apiInvoke<string[]>('list_provider_models',{settings});
+  async function fetchModels(settings?:LlmSettings){
+    const found=await apiInvoke<string[]>('list_provider_models',settings ? {settings} : {});
     setModels(found);
     return found;
   }
@@ -342,13 +478,22 @@ function App(){
   async function refreshModels(){
     try{
       const found=await fetchModels(llm);
-      if(!llm.model && found[0]) setLlm(x=>({...x,model:found[0]}));
+      if(!llm.model && found[0]){
+        const next={...llm,model:found[0]};
+        setLlm(next);
+        setGenerationDraft(d=>({...d,llm:next}));
+      }
     }catch(e){
       setError(String(e));
     }
   }
 
-  async function scan(rootOverride=comfyRoot,raphaelOverride=raphaelRoot || undefined){
+  async function scan(
+    rootOverride=comfyRoot,
+    raphaelOverride=raphaelRoot || undefined,
+    selectionOverride?:{selectedId?:string;selectedLoraIds?:string[];manualLoraIds?:string[]},
+    persist=true,
+  ){
     setError('');
     setStage('library');
     setStageStatus('library','running');
@@ -356,13 +501,30 @@ function App(){
       const snap=await apiInvoke<LibrarySnapshot>('scan_library',{
         req:{comfyRoot:rootOverride,raphaelRoot:raphaelOverride || null},
       });
-      setLibrary(snap);
-      if(!selectedId && snap.checkpoints[0]) setSelectedId(snap.checkpoints[0].id);
+      const preferredId=selectionOverride?.selectedId || selectedId;
+      const nextSelectedId=preferredId && snap.checkpoints.some(x=>x.id===preferredId)
+        ? preferredId
+        : (snap.checkpoints[0]?.id || '');
       const ids=new Set(snap.loras.map(x=>x.id));
-      setSelectedLoraIds(current=>current.filter(id=>ids.has(id)));
-      setManualLoraIds(current=>current.filter(id=>ids.has(id)));
+      const sourceSelectedLoraIds=selectionOverride?.selectedLoraIds || selectedLoraIds;
+      const sourceManualLoraIds=selectionOverride?.manualLoraIds || manualLoraIds;
+      const nextSelectedLoraIds=sourceSelectedLoraIds.filter(id=>ids.has(id));
+      const nextManualLoraIds=sourceManualLoraIds.filter(id=>ids.has(id));
+      setLibrary(snap);
+      setSelectedId(nextSelectedId);
+      setSelectedLoraIds(nextSelectedLoraIds);
+      setManualLoraIds(nextManualLoraIds);
       setStageStatus('library','done');
       setToast(snap.checkpoints.length + ' checkpoints · ' + snap.loras.length + ' LoRAs');
+      if(persist){
+        await persistHostSettings({
+          comfyRoot:rootOverride,
+          raphaelRoot:raphaelOverride || '',
+          selectedId:nextSelectedId,
+          selectedLoraIds:nextSelectedLoraIds,
+          manualLoraIds:nextManualLoraIds,
+        });
+      }
     }catch(e){
       setStageStatus('library','error');
       setError(String(e));
@@ -373,7 +535,7 @@ function App(){
     setConstraints(x=>({...x,[key]:value}));
   }
 
-  function saveGenerationSettings(){
+  async function saveGenerationSettings(){
     const draft=generationDraft;
     const cappedMax=Math.max(1,Math.min(16,draft.maxLoras));
     const nextConstraints={
@@ -381,20 +543,27 @@ function App(){
       randomLoraMin:Math.max(1,Math.min(cappedMax,draft.randomLoraMin)),
       randomLoraMax:Math.max(1,Math.min(cappedMax,draft.randomLoraMax)),
     };
-    setProvider(draft.llm.provider);
-    setLlm({...draft.llm,provider:draft.llm.provider});
-    setConstraints(nextConstraints);
-    setSystemPrompt(draft.systemPrompt);
-    setDemographic(draft.demographic);
-    setDemographicPrompts({...draft.demographicPrompts});
-    setMaxLoras(cappedMax);
-    setWidth(Math.max(64,draft.width));
-    setHeight(Math.max(64,draft.height));
-    setSteps(Math.max(1,draft.steps));
-    setCfg(Math.max(0,draft.cfg));
-    setSampler(draft.sampler || 'euler');
-    setSettingsOpen(false);
-    setToast('Generation settings saved');
+    try{
+      await persistHostSettings({
+        llm:{...draft.llm,provider:draft.llm.provider},
+        systemPrompt:draft.systemPrompt || defaultSystemPrompt,
+        demographic:draft.demographic,
+        demographicPrompts:{...draft.demographicPrompts},
+        maxLoras:cappedMax,
+        randomLoraMin:nextConstraints.randomLoraMin,
+        randomLoraMax:nextConstraints.randomLoraMax,
+        constraints:nextConstraints,
+        width:Math.max(64,draft.width),
+        height:Math.max(64,draft.height),
+        steps:Math.max(1,draft.steps),
+        cfg:Math.max(0,draft.cfg),
+        sampler:draft.sampler || 'euler',
+      });
+      setSettingsOpen(false);
+      setToast('Generation settings saved to host');
+    }catch(e){
+      setError(String(e));
+    }
   }
 
   async function rollStack(){
@@ -418,6 +587,7 @@ function App(){
     const combinedIds=[...manualIds,...randomIds];
 
     setSelectedLoraIds(combinedIds);
+    void persistHostSettings({selectedLoraIds:combinedIds,manualLoraIds:manualIds});
     setPrepared(null);
     setPrompts(null);
     setStage('compatibility');
@@ -448,15 +618,17 @@ function App(){
 
   function toggleLora(id:string){
     const alreadySelected=selectedLoraIds.includes(id);
-    if(alreadySelected){
-      setSelectedLoraIds(current=>current.filter(x=>x!==id));
-      setManualLoraIds(current=>current.filter(x=>x!==id));
-    }else{
-      setSelectedLoraIds(current=>[...current,id]);
-      setManualLoraIds(current=>[...current,id]);
-    }
+    const nextSelectedLoraIds=alreadySelected
+      ? selectedLoraIds.filter(x=>x!==id)
+      : [...selectedLoraIds,id];
+    const nextManualLoraIds=alreadySelected
+      ? manualLoraIds.filter(x=>x!==id)
+      : [...manualLoraIds,id];
+    setSelectedLoraIds(nextSelectedLoraIds);
+    setManualLoraIds(nextManualLoraIds);
     setPrepared(null);
     setPrompts(null);
+    void persistHostSettings({selectedLoraIds:nextSelectedLoraIds,manualLoraIds:nextManualLoraIds});
   }
 
   async function generate(){
@@ -476,6 +648,13 @@ function App(){
 
     try{
       const generationSelectedLoraIds=selectedLoraIds.filter(id=>compatibleLoras.some(lora=>lora.id===id));
+      await apiInvoke<HostSettings>('save_settings',{
+        settings:buildHostSettings({
+          selectedId:selected.id,
+          selectedLoraIds:generationSelectedLoraIds,
+          manualLoraIds:manualLoraIds.filter(id=>generationSelectedLoraIds.includes(id)),
+        }),
+      }).then(saved=>setSettingsRevision(saved.revision));
 
       setStage('compatibility');
       setStageStatus('compatibility','running');
@@ -687,6 +866,7 @@ function App(){
     setSelectedId(id);
     setPrepared(null);
     setPrompts(null);
+    void persistHostSettings({selectedId:id});
   }
 
   async function copy(text:string){
