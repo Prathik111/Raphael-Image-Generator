@@ -129,3 +129,26 @@ export interface WebHostInfo {
   localUrl: string;
   lanUrl: string;
 }
+
+export interface HostSettings {
+  llm: LlmSettings;
+  systemPrompt: string;
+  demographic: DemographicLevel;
+  demographicPrompts: DemographicPrompts;
+  maxLoras: number;
+  randomLoraMin: number;
+  randomLoraMax: number;
+  constraints: Constraints;
+  width: number;
+  height: number;
+  steps: number;
+  cfg: number;
+  sampler: string;
+  comfyRoot: string;
+  raphaelRoot: string;
+  comfyUrl: string;
+  selectedId: string;
+  selectedLoraIds: string[];
+  manualLoraIds: string[];
+  revision: number;
+}
