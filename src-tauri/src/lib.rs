@@ -632,8 +632,8 @@ fn scan_library(req:ScanRequest)->Result<LibrarySnapshot,String>{
 }
 
 #[tauri::command]
-async fn list_provider_models(app:AppHandle)->Result<Vec<String>,String>{
-    let settings=load_host_settings(&app)?.llm;
+async fn list_provider_models(app:AppHandle,override_settings:Option<LlmSettings>)->Result<Vec<String>,String>{
+    let settings=match override_settings { Some(value)=>value, None=>load_host_settings(&app)?.llm };
     let client=reqwest::Client::new(); let base=base_url(&settings.base_url);
     let (url,need_auth)=if settings.provider=="ollama"{(format!("{}/api/tags",base),false)}else{(if base.ends_with("/v1"){format!("{}/models",base)}else{format!("{}/v1/models",base)},true)};
     let mut request=client.get(url); if need_auth&&!settings.api_key.is_empty(){request=request.bearer_auth(settings.api_key);}
@@ -1343,7 +1343,8 @@ async fn web_command(
             serde_json::to_value(save_settings(state.app.clone(),settings)?).map_err(|e|e.to_string())
         }
         "list_provider_models"=>{
-            let models=list_provider_models(state.app.clone()).await?;
+            let override_settings=body.get("settings").cloned().and_then(|value|serde_json::from_value::<LlmSettings>(value).ok());
+            let models=list_provider_models(state.app.clone(),override_settings).await?;
             serde_json::to_value(models).map_err(|e|e.to_string())
         }
         "scan_library"=>{
