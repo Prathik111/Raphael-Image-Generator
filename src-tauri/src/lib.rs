@@ -509,15 +509,26 @@ async fn scan_registry_library(req: &ScanRequest) -> Result<LibrarySnapshot, Str
     let root = root_path.is_dir().then_some(root_path);
 
     let (base_url, token) = ensure_registry(req.registry_url.as_deref()).await?;
-    let (checkpoint_models, lora_models) = tokio::join!(
-        registry_models(&base_url, &token, "/api/v1/checkpoints"),
-        registry_models(&base_url, &token, "/api/v1/loras"),
-    );
-    let checkpoint_models = checkpoint_models?;
-    let lora_models = lora_models?;
+
+    // The canonical Registry catalog is /api/v1/models. The dedicated
+    // /checkpoints and /loras routes are convenience filters; consuming the
+    // canonical catalog avoids depending on those convenience routes and
+    // keeps the Image Generator compatible with older/newer Registry builds.
+    let all_models = registry_models(&base_url, &token, "/api/v1/models").await?;
+
+    let checkpoint_models: Vec<RegistryModel> = all_models
+        .iter()
+        .filter(|model| model.model_type.eq_ignore_ascii_case("checkpoint"))
+        .cloned()
+        .collect();
+    let lora_models: Vec<RegistryModel> = all_models
+        .iter()
+        .filter(|model| model.model_type.eq_ignore_ascii_case("lora"))
+        .cloned()
+        .collect();
+
     let mut checkpoints = Vec::new();
     let mut loras = Vec::new();
-
     let mut hydration_failures = 0usize;
 
     for chunk in checkpoint_models.chunks(16) {
@@ -526,7 +537,9 @@ async fn scan_registry_library(req: &ScanRequest) -> Result<LibrarySnapshot, Str
                 let root = root.map(Path::to_path_buf);
                 let base_url = base_url.clone();
                 let token = token.clone();
-                async move { hydrate_registry_model(model, &base_url, &token, root.as_deref()).await }
+                async move {
+                    hydrate_registry_model(model, &base_url, &token, root.as_deref()).await
+                }
             })
             .buffer_unordered(16);
         tokio::pin!(hydrated);
@@ -545,7 +558,9 @@ async fn scan_registry_library(req: &ScanRequest) -> Result<LibrarySnapshot, Str
                 let root = root.map(Path::to_path_buf);
                 let base_url = base_url.clone();
                 let token = token.clone();
-                async move { hydrate_registry_model(model, &base_url, &token, root.as_deref()).await }
+                async move {
+                    hydrate_registry_model(model, &base_url, &token, root.as_deref()).await
+                }
             })
             .buffer_unordered(16);
         tokio::pin!(hydrated);
@@ -562,11 +577,27 @@ async fn scan_registry_library(req: &ScanRequest) -> Result<LibrarySnapshot, Str
     loras.sort_by_key(|model| model.name.to_lowercase());
 
     let mut warnings = Vec::new();
-    if checkpoints.is_empty() {
-        warnings.push("The Raphael Model Registry returned no checkpoint records.".into());
+    if all_models.is_empty() {
+        warnings.push(
+            "The Raphael Model Registry catalog is empty. The Image Generator is connected to the Registry, but no models are registered.".into()
+        );
+    } else if checkpoint_models.is_empty() {
+        warnings.push(format!(
+            "The Raphael Model Registry returned {} model records, but none are typed as checkpoints.",
+            all_models.len()
+        ));
     }
-    if loras.is_empty() {
-        warnings.push("The Raphael Model Registry returned no LoRA records.".into());
+    if lora_models.is_empty() {
+        if all_models.is_empty() {
+            warnings.push(
+                "No LoRAs are available because the Raphael Model Registry catalog contains no model records.".into()
+            );
+        } else {
+            warnings.push(format!(
+                "The Raphael Model Registry returned {} model records, but none are typed as LoRA.",
+                all_models.len()
+            ));
+        }
     }
     if hydration_failures > 0 {
         warnings.push(format!(
