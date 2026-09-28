@@ -1546,6 +1546,26 @@ pub fn run(){
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn registry_absolute_file_path_does_not_require_client_models_root() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let model_path = temp.path().join("host-model.safetensors");
+        std::fs::write(&model_path, b"model").expect("model file");
+
+        let file = RegistryFile {
+            version_id: None,
+            path: model_path.to_string_lossy().to_string(),
+            relative_path: None,
+            filename: "host-model.safetensors".into(),
+            size_bytes: 5,
+            status: "available".into(),
+        };
+
+        let resolved = registry_model_file_path(&file, Some(Path::new("D:\\nonexistent\\client\\models")))
+            .expect("Registry absolute path should resolve on the host");
+        assert_eq!(resolved, model_path.canonicalize().unwrap());
+    }
+
 
     #[test]
     fn finalize_prompt_strips_generated_lora_syntax() {
