@@ -11,7 +11,7 @@ export interface ModelInfo {
   activationTags: string[];
   character: boolean;
   thumbnail?: string;
-  source: 'comfyui' | 'raphael-cache' | 'merged';
+  source: 'comfyui' | 'raphael-registry' | 'raphael-cache' | 'merged';
   cacheName?: string;
   cacheDescription?: string;
 }
