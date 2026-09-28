@@ -342,7 +342,7 @@ function App(){
 
       await scan(config.models_root || comfyRoot,config.registry_url || undefined);
     }catch(e){
-      if(!isTauriRuntime) setError(String(e));
+      setError(String(e));
     }
   }
 
