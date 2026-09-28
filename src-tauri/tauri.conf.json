@@ -5,7 +5,7 @@
   "identifier": "com.prathik.raphael.promptforge",
   "build": {
     "beforeDevCommand": "npm run build && npm run dev",
-    "devUrl": "http://127.0.0.1:1420",
+    "devUrl": "http://127.0.0.1:1430",
     "beforeBuildCommand": "npm run build",
     "frontendDist": "../dist"
   },
