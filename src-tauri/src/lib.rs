@@ -426,10 +426,14 @@ async fn hydrate_registry_model(
     comfy_root: Option<&Path>,
 ) -> Result<Option<ModelInfo>, String> {
     let encoded = urlencoding::encode(&model.id);
-    let versions_future = registry_json::<Vec<RegistryVersion>>(base_url, token, &format!("/api/v1/models/{encoded}/versions"));
-    let files_future = registry_json::<Vec<RegistryFile>>(base_url, token, &format!("/api/v1/models/{encoded}/files"));
-    let tags_future = registry_json::<Vec<String>>(base_url, token, &format!("/api/v1/models/{encoded}/tags"));
-    let assets_future = registry_json::<Vec<RegistryAsset>>(base_url, token, &format!("/api/v1/models/{encoded}/assets"));
+    let versions_path = format!("/api/v1/models/{encoded}/versions");
+    let files_path = format!("/api/v1/models/{encoded}/files");
+    let tags_path = format!("/api/v1/models/{encoded}/tags");
+    let assets_path = format!("/api/v1/models/{encoded}/assets");
+    let versions_future = registry_json::<Vec<RegistryVersion>>(base_url, token, &versions_path);
+    let files_future = registry_json::<Vec<RegistryFile>>(base_url, token, &files_path);
+    let tags_future = registry_json::<Vec<String>>(base_url, token, &tags_path);
+    let assets_future = registry_json::<Vec<RegistryAsset>>(base_url, token, &assets_path);
     let (versions, files, tags, assets) = tokio::join!(versions_future, files_future, tags_future, assets_future);
     let versions = versions?;
     let files = files?;
