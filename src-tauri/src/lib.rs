@@ -377,24 +377,34 @@ async fn registry_models(base_url: &str, token: &str, endpoint: &str) -> Result<
     Ok(all)
 }
 
-fn registry_model_file_path(file: &RegistryFile, comfy_root: &Path) -> Option<PathBuf> {
-    let root = comfy_root.canonicalize().unwrap_or_else(|_| comfy_root.to_path_buf());
-    let mut candidates = Vec::new();
+fn registry_model_file_path(file: &RegistryFile, comfy_root: Option<&Path>) -> Option<PathBuf> {
+    let root = comfy_root
+        .filter(|path| path.is_dir())
+        .and_then(|path| path.canonicalize().ok());
+
     let registry_path = PathBuf::from(&file.path);
-    if registry_path.is_absolute() {
-        candidates.push(registry_path);
-    } else {
+    if registry_path.is_absolute() && registry_path.is_file() {
+        let canonical = registry_path.canonicalize().unwrap_or(registry_path);
+        return Some(canonical);
+    }
+
+    let Some(root) = root else {
+        return None;
+    };
+
+    let mut candidates = Vec::new();
+    if !file.path.is_empty() {
         candidates.push(root.join(&file.path));
     }
     if let Some(relative) = &file.relative_path {
-        let relative_path = PathBuf::from(relative);
-        candidates.push(root.join(relative_path.clone()));
+        candidates.push(root.join(relative));
         let normalized = relative.replace('\\', "/");
         if let Some(stripped) = normalized.strip_prefix("models/") {
             candidates.push(root.join(stripped));
         }
     }
     candidates.push(root.join(&file.filename));
+
     for candidate in candidates {
         if !candidate.is_file() {
             continue;
@@ -411,7 +421,7 @@ async fn hydrate_registry_model(
     model: RegistryModel,
     base_url: &str,
     token: &str,
-    comfy_root: &Path,
+    comfy_root: Option<&Path>,
 ) -> Result<Option<ModelInfo>, String> {
     let encoded = urlencoding::encode(&model.id);
     let versions_future = registry_json::<Vec<RegistryVersion>>(base_url, token, &format!("/api/v1/models/{encoded}/versions"));
@@ -468,10 +478,8 @@ async fn hydrate_registry_model(
 }
 
 async fn scan_registry_library(req: &ScanRequest) -> Result<LibrarySnapshot, String> {
-    let root = Path::new(&req.comfy_root);
-    if !root.is_dir() {
-        return Err(format!("ComfyUI models root is not a folder: {}", req.comfy_root));
-    }
+    let root_path = Path::new(&req.comfy_root);
+    let root = root_path.is_dir().then_some(root_path);
 
     let (base_url, token) = ensure_registry(req.registry_url.as_deref()).await?;
     let (checkpoint_models, lora_models) = tokio::join!(
@@ -486,10 +494,10 @@ async fn scan_registry_library(req: &ScanRequest) -> Result<LibrarySnapshot, Str
     for chunk in checkpoint_models.chunks(16) {
         let hydrated = futures_util::stream::iter(chunk.iter().cloned())
             .map(|model| {
-                let root = root.to_path_buf();
+                let root = root.map(Path::to_path_buf);
                 let base_url = base_url.clone();
                 let token = token.clone();
-                async move { hydrate_registry_model(model, &base_url, &token, &root).await }
+                async move { hydrate_registry_model(model, &base_url, &token, root.as_deref()).await }
             })
             .buffer_unordered(16);
         tokio::pin!(hydrated);
@@ -528,10 +536,15 @@ async fn scan_registry_library(req: &ScanRequest) -> Result<LibrarySnapshot, Str
         warnings.push("The Registry has no available LoRAs whose registered files exist under the selected ComfyUI models root.".into());
     }
 
+    let mut source_roots = vec![base_url];
+    if let Some(root) = root {
+        source_roots.insert(0, root.to_string_lossy().to_string());
+    }
+
     Ok(LibrarySnapshot {
         checkpoints,
         loras,
-        source_roots: vec![req.comfy_root.clone(), base_url],
+        source_roots,
         warnings,
     })
 }
