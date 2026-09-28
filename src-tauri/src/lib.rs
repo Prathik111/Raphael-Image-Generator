@@ -15,8 +15,7 @@ use futures_util::StreamExt;
 use rand::{prelude::IndexedRandom, seq::SliceRandom, Rng};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{fs, path::{Path, PathBuf}, sync::Arc, time::{Duration, Instant, SystemTime, UNIX_EPOCH}};
-use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use std::{fs, path::{Path, PathBuf}, process::Command, sync::Arc, time::{Duration, Instant, SystemTime, UNIX_EPOCH}};
 use tauri::{AppHandle, Manager};
 use tauri::ipc::Channel;
 use tokio::sync::Mutex;
@@ -45,7 +44,7 @@ struct LibrarySnapshot { checkpoints: Vec<ModelInfo>, loras: Vec<ModelInfo>, sou
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct ScanRequest { comfy_root: String, raphael_root: Option<String> }
+struct ScanRequest { comfy_root: String, #[serde(default)] registry_url: Option<String> }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -184,266 +183,365 @@ struct WebApiState {
 fn norm(s: &str) -> String { s.trim().to_lowercase().replace([' ', '_', '-', '.', '/'], "") }
 fn base_url(s: &str) -> String { s.trim().trim_end_matches('/').to_string() }
 
-fn val_str(v: &Value, keys: &[&str]) -> Option<String> {
-    keys.iter().find_map(|k| v.get(*k).and_then(|x| x.as_str()).map(str::to_string))
+#[derive(Debug, Clone, Deserialize)]
+struct RegistrySearchResult {
+    items: Vec<RegistryModel>,
+    total: i64,
+    limit: i64,
+    offset: i64,
 }
 
-fn val_vec(v: &Value, keys: &[&str]) -> Vec<String> {
-    keys.iter().find_map(|k| v.get(*k).and_then(|x| x.as_array()).map(|a|
-        a.iter().filter_map(|x| x.as_str().map(str::to_string)).filter(|x| !x.is_empty()).collect::<Vec<_>>()
-    )).unwrap_or_default()
+#[derive(Debug, Clone, Deserialize)]
+struct RegistryModel {
+    id: String,
+    name: String,
+    model_type: String,
+    description: Option<String>,
+    base_model: Option<String>,
 }
 
-fn is_character(tags: &[String]) -> bool { tags.iter().any(|x| norm(x) == "character") }
+#[derive(Debug, Clone, Deserialize)]
+struct RegistryVersion {
+    id: String,
+    model_id: String,
+    version_name: Option<String>,
+    base_model: Option<String>,
+    #[serde(default)]
+    activation_prompts: Vec<String>,
+}
 
-fn thumbnail(v: &Value, root: &Path) -> Option<String> {
-    for key in ["thumbnail", "thumbnailPath", "cover", "coverImage", "preview", "localThumbnail"] {
-        if let Some(s) = v.get(key).and_then(|x| x.as_str()) {
-            let q = PathBuf::from(s);
-            let q = if q.is_absolute() { q } else { root.join(q) };
-            if q.exists() { return Some(q.to_string_lossy().to_string()); }
+#[derive(Debug, Clone, Deserialize)]
+struct RegistryFile {
+    id: String,
+    model_id: String,
+    version_id: Option<String>,
+    path: String,
+    relative_path: Option<String>,
+    filename: String,
+    size_bytes: i64,
+    status: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RegistryAsset {
+    id: String,
+    model_id: String,
+    kind: String,
+    path: String,
+}
+
+fn registry_base_url(override_url: Option<&str>) -> String {
+    if let Some(value) = override_url.map(str::trim).filter(|value| !value.is_empty()) {
+        return value.trim_end_matches('/').to_string();
+    }
+    std::env::var("RAPHAEL_REGISTRY_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| value.trim_end_matches('/').to_string())
+        .unwrap_or_else(|| "http://127.0.0.1:43217".into())
+}
+
+fn registry_data_dir() -> PathBuf {
+    if let Some(value) = std::env::var_os("RAPHAEL_REGISTRY_DATA_DIR") {
+        return PathBuf::from(value);
+    }
+    directories::ProjectDirs::from("com", "Raphael", "ModelRegistry")
+        .map(|dirs| dirs.data_dir().to_path_buf())
+        .unwrap_or_else(|| PathBuf::from(".raphael-model-registry"))
+}
+
+fn registry_token(data_dir: &Path) -> Result<String, String> {
+    if let Ok(value) = std::env::var("RAPHAEL_REGISTRY_AUTH_TOKEN") {
+        let value = value.trim().to_string();
+        if !value.is_empty() {
+            return Ok(value);
+        }
+    }
+    let path = data_dir.join("registry.token");
+    let value = fs::read_to_string(&path)
+        .map_err(|error| format!("Raphael Model Registry token could not be read from {}: {}", path.display(), error))?
+        .trim()
+        .to_string();
+    if value.is_empty() {
+        return Err(format!("Raphael Model Registry token is empty: {}", path.display()));
+    }
+    Ok(value)
+}
+
+fn registry_executable_candidates() -> Vec<PathBuf> {
+    let executable_name = if cfg!(windows) { "raphael-registry.exe" } else { "raphael-registry" };
+    let mut candidates = Vec::new();
+
+    if let Some(value) = std::env::var_os("RAPHAEL_REGISTRY_EXECUTABLE") {
+        candidates.push(PathBuf::from(value));
+    }
+
+    if let Ok(current_exe) = std::env::current_exe() {
+        let mut ancestor = current_exe.parent().map(Path::to_path_buf);
+        for _ in 0..5 {
+            let Some(dir) = ancestor else { break };
+            candidates.push(dir.join(executable_name));
+            candidates.push(dir.join("resources").join(executable_name));
+            candidates.push(dir.join("registry").join(executable_name));
+            candidates.push(dir.join("bin").join(executable_name));
+            ancestor = dir.parent().map(Path::to_path_buf);
+        }
+    }
+
+    if let Some(path_var) = std::env::var_os("PATH") {
+        for directory in std::env::split_paths(&path_var) {
+            candidates.push(directory.join(executable_name));
+        }
+    }
+
+    candidates
+}
+
+fn registry_executable() -> Result<PathBuf, String> {
+    registry_executable_candidates()
+        .into_iter()
+        .find(|path| path.is_file())
+        .ok_or_else(|| {
+            format!(
+                "Raphael Model Registry is not running and its server executable was not found. Set RAPHAEL_REGISTRY_EXECUTABLE to the full path of raphael-registry{}.",
+                if cfg!(windows) { ".exe" } else { "" }
+            )
+        })
+}
+
+async fn registry_health(base_url: &str) -> bool {
+    reqwest::Client::new()
+        .get(format!("{base_url}/health"))
+        .timeout(Duration::from_secs(2))
+        .send()
+        .await
+        .map(|response| response.status().is_success())
+        .unwrap_or(false)
+}
+
+async fn ensure_registry(override_url: Option<&str>) -> Result<(String, String), String> {
+    let base_url = registry_base_url(override_url);
+    let data_dir = registry_data_dir();
+
+    if !registry_health(&base_url).await {
+        let executable = registry_executable()?;
+        Command::new(&executable)
+            .arg("server")
+            .spawn()
+            .map_err(|error| format!("Could not start Raphael Model Registry from {}: {}", executable.display(), error))?;
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if registry_health(&base_url).await {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(150)).await;
+            }
+        })
+        .await
+        .map_err(|_| "Raphael Model Registry did not become healthy within 10 seconds.".to_string())?;
+    }
+
+    let token = registry_token(&data_dir)?;
+    Ok((base_url, token))
+}
+
+async fn registry_json<T: serde::de::DeserializeOwned>(
+    base_url: &str,
+    token: &str,
+    path: &str,
+) -> Result<T, String> {
+    let response = reqwest::Client::new()
+        .get(format!("{base_url}{path}"))
+        .bearer_auth(token)
+        .header("x-raphael-actor", "image-generator")
+        .send()
+        .await
+        .map_err(|error| format!("Registry request failed: {error}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!("Registry returned HTTP {status}: {body}"));
+    }
+    response.json::<T>().await.map_err(|error| format!("Invalid Registry response: {error}"))
+}
+
+async fn registry_models(base_url: &str, token: &str, endpoint: &str) -> Result<Vec<RegistryModel>, String> {
+    let mut all = Vec::new();
+    let mut offset = 0_i64;
+    loop {
+        let response: RegistrySearchResult =
+            registry_json(base_url, token, &format!("{endpoint}?limit=200&offset={offset}")).await?;
+        let count = response.items.len() as i64;
+        all.extend(response.items);
+        if count == 0 || offset + count >= response.total {
+            break;
+        }
+        offset += count;
+    }
+    Ok(all)
+}
+
+fn registry_model_file_path(file: &RegistryFile, comfy_root: &Path) -> Option<PathBuf> {
+    let root = comfy_root.canonicalize().unwrap_or_else(|_| comfy_root.to_path_buf());
+    let mut candidates = Vec::new();
+    let registry_path = PathBuf::from(&file.path);
+    if registry_path.is_absolute() {
+        candidates.push(registry_path);
+    } else {
+        candidates.push(root.join(&file.path));
+    }
+    if let Some(relative) = &file.relative_path {
+        let relative_path = PathBuf::from(relative);
+        candidates.push(root.join(relative_path.clone()));
+        let normalized = relative.replace('\\', "/");
+        if let Some(stripped) = normalized.strip_prefix("models/") {
+            candidates.push(root.join(stripped));
+        }
+    }
+    candidates.push(root.join(&file.filename));
+    for candidate in candidates {
+        if !candidate.is_file() {
+            continue;
+        }
+        let canonical = candidate.canonicalize().unwrap_or(candidate);
+        if canonical.starts_with(&root) {
+            return Some(canonical);
         }
     }
     None
 }
 
-fn cache_objects(v: &Value, root: &Path, out: &mut Vec<ModelInfo>, depth: usize) {
-    if depth > 7 { return; }
-    if let Some(name) = val_str(v, &["name","modelName","title","displayName"]) {
-        let kind_raw = val_str(v, &["type","modelType","model_type"]).unwrap_or_default().to_lowercase();
-        let path = val_str(v, &["path","filePath","file_path","modelPath","location","relativePath"]).unwrap_or_default();
-        let base = val_str(v, &["baseModel","base_model","base","trainedModel"]);
-        let tags = val_vec(v, &["tags","modelTags","model_tags","baseTags"]);
-        let activation = val_vec(v, &["activationTags","activation_tags","triggerWords","trainedWords","trained_words"]);
-        let desc = val_str(v, &["description","desc"]);
-        let kind = if kind_raw.contains("checkpoint") { "checkpoint" } else if kind_raw.contains("lora") || base.is_some() { "lora" } else { "" };
-        if !kind.is_empty() {
-            let p = if path.is_empty() { String::new() } else {
-                let q = PathBuf::from(&path);
-                if q.is_absolute() { q.to_string_lossy().to_string() } else { root.join(q).to_string_lossy().to_string() }
-            };
-            out.push(ModelInfo {
-                id: "cache-".to_string()+&norm(&name), name, kind: kind.to_string(), path: p, size: 0,
-                base_model: base, tags: tags.clone(),
-                activation_tags: if activation.is_empty() { tags.clone() } else { activation },
-                character: is_character(&tags), thumbnail: thumbnail(v,root), source: "raphael-cache".into(),
-                cache_name: None, cache_description: desc,
-            });
-        }
-    }
-    match v {
-        Value::Object(m) => for x in m.values() { cache_objects(x,root,out,depth+1); },
-        Value::Array(a) => for x in a.iter().take(1200) { cache_objects(x,root,out,depth+1); },
-        _ => {}
-    }
+async fn hydrate_registry_model(
+    model: RegistryModel,
+    base_url: &str,
+    token: &str,
+    comfy_root: &Path,
+) -> Result<Option<ModelInfo>, String> {
+    let encoded = urlencoding::encode(&model.id);
+    let versions_future = registry_json::<Vec<RegistryVersion>>(base_url, token, &format!("/api/v1/models/{encoded}/versions"));
+    let files_future = registry_json::<Vec<RegistryFile>>(base_url, token, &format!("/api/v1/models/{encoded}/files"));
+    let tags_future = registry_json::<Vec<String>>(base_url, token, &format!("/api/v1/models/{encoded}/tags"));
+    let assets_future = registry_json::<Vec<RegistryAsset>>(base_url, token, &format!("/api/v1/models/{encoded}/assets"));
+    let (versions, files, tags, assets) = tokio::join!(versions_future, files_future, tags_future, assets_future);
+    let versions = versions?;
+    let files = files?;
+    let tags = tags?;
+    let assets = assets?;
+
+    let latest_version = versions.first();
+    let base_model = latest_version.and_then(|version| version.base_model.clone()).or_else(|| model.base_model.clone());
+    let activation_tags = latest_version.map(|version| version.activation_prompts.clone()).unwrap_or_default();
+    let preferred_version_id = latest_version.map(|version| version.id.as_str());
+
+    let selected_file = files.iter()
+        .filter(|file| file.status.eq_ignore_ascii_case("available"))
+        .filter(|file| preferred_version_id.is_none() || file.version_id.as_deref() == preferred_version_id)
+        .find_map(|file| registry_model_file_path(file, comfy_root))
+        .or_else(|| files.iter()
+            .filter(|file| file.status.eq_ignore_ascii_case("available"))
+            .find_map(|file| registry_model_file_path(file, comfy_root)));
+
+    let Some(file_path) = selected_file else {
+        return Ok(None);
+    };
+
+    let size = files.iter()
+        .find(|file| registry_model_file_path(file, comfy_root).as_deref() == Some(file_path.as_path()))
+        .map(|file| file.size_bytes.max(0) as u64)
+        .unwrap_or(0);
+
+    let thumbnail = assets.iter()
+        .find(|asset| asset.kind.eq_ignore_ascii_case("thumbnail"))
+        .or_else(|| assets.iter().find(|asset| asset.kind.eq_ignore_ascii_case("cover")))
+        .map(|asset| format!("registry://{}/{}", model.id, asset.id));
+
+    Ok(Some(ModelInfo {
+        id: model.id,
+        name: model.name,
+        kind: model.model_type,
+        path: file_path.to_string_lossy().to_string(),
+        size,
+        base_model,
+        tags: tags.clone(),
+        activation_tags,
+        character: tags.iter().any(|tag| norm(tag) == "character"),
+        thumbnail,
+        source: "raphael-registry".into(),
+        cache_name: None,
+        cache_description: model.description,
+    }))
 }
 
-fn scan_cache(root: &Path) -> Vec<ModelInfo> {
-    if !root.exists() { return vec![]; }
-    let mut out = Vec::new();
-    for entry in WalkDir::new(root).follow_links(false).into_iter().filter_map(Result::ok) {
-        if !entry.file_type().is_file() || entry.path().extension().and_then(|x|x.to_str()) != Some("json") { continue; }
-        if entry.metadata().map(|m|m.len()>4_000_000).unwrap_or(true) { continue; }
-        let bytes = match fs::read(entry.path()) { Ok(x)=>x, Err(_)=>continue };
-        let value = match serde_json::from_slice::<Value>(&bytes) { Ok(x)=>x, Err(_)=>continue };
-        cache_objects(&value,root,&mut out,0);
+async fn scan_registry_library(req: &ScanRequest) -> Result<LibrarySnapshot, String> {
+    let root = Path::new(&req.comfy_root);
+    if !root.is_dir() {
+        return Err(format!("ComfyUI models root is not a folder: {}", req.comfy_root));
     }
-    out
-}
 
+    let (base_url, token) = ensure_registry(req.registry_url.as_deref()).await?;
+    let (checkpoint_models, lora_models) = tokio::join!(
+        registry_models(&base_url, &token, "/api/v1/checkpoints"),
+        registry_models(&base_url, &token, "/api/v1/loras"),
+    );
+    let checkpoint_models = checkpoint_models?;
+    let lora_models = lora_models?;
+    let mut checkpoints = Vec::new();
+    let mut loras = Vec::new();
 
-fn is_path_under(root: &Path, candidate: &Path) -> bool {
-    let root_abs = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    let candidate_abs = candidate.canonicalize().unwrap_or_else(|_| candidate.to_path_buf());
-    if candidate_abs.starts_with(&root_abs) {
-        return true;
-    }
-    let root_s = root_abs.to_string_lossy().replace('\\', "/").to_lowercase();
-    let candidate_s = candidate_abs.to_string_lossy().replace('\\', "/").to_lowercase();
-    candidate_s == root_s || candidate_s.starts_with(&(root_s + "/"))
-}
-
-fn manager_db_candidates(extra_root: Option<&str>) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    if let Some(value) = extra_root.map(str::trim).filter(|x| !x.is_empty()) {
-        let p = PathBuf::from(value);
-        if p.is_file() && p.file_name().and_then(|x| x.to_str()).map(|x| x.eq_ignore_ascii_case("raphael.db")).unwrap_or(false) {
-            out.push(p);
-        } else if p.is_dir() {
-            out.push(p.join("raphael.db"));
-        }
-    }
-    for env_name in ["APPDATA", "LOCALAPPDATA"] {
-        if let Ok(base) = std::env::var(env_name) {
-            let base = PathBuf::from(base);
-            for rel in [
-                PathBuf::from("com.raphael.modelmanager").join("raphael.db"),
-                PathBuf::from("Raphael Model Manager").join("raphael.db"),
-                PathBuf::from("Raphael-Model-Manager").join("raphael.db"),
-            ] {
-                out.push(base.join(rel));
+    for chunk in checkpoint_models.chunks(16) {
+        let hydrated = futures_util::stream::iter(chunk.iter().cloned())
+            .map(|model| {
+                let root = root.to_path_buf();
+                let base_url = base_url.clone();
+                let token = token.clone();
+                async move { hydrate_registry_model(model, &base_url, &token, &root).await }
+            })
+            .buffer_unordered(16);
+        tokio::pin!(hydrated);
+        while let Some(result) = hydrated.next().await {
+            if let Some(model) = result? {
+                checkpoints.push(model);
             }
         }
     }
-    out.sort();
-    out.dedup();
-    out
-}
 
-fn manager_model_type(raw: &str) -> Option<&'static str> {
-    match raw {
-        "Checkpoint" | "checkpoint" => Some("checkpoint"),
-        "LoRA" | "lora" => Some("lora"),
-        _ => None,
-    }
-}
-
-fn load_manager_models(db_path: &Path, comfy_root: &Path) -> Result<(Vec<ModelInfo>, Vec<ModelInfo>), String> {
-    if !db_path.is_file() {
-        return Ok((vec![], vec![]));
-    }
-    let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(|e| format!("Could not open Raphael Model Manager database {}: {}", db_path.display(), e))?;
-
-    let mut stmt = conn.prepare(
-        "SELECT id,path,filename,model_type,size_bytes,base_model,description,tags_json,activation_json,thumbnail_path,cover_path,civitai_name,version_name
-         FROM models"
-    ).map_err(|e| format!("Raphael database schema error: {}", e))?;
-
-    let mut checkpoints = Vec::new();
-    let mut loras = Vec::new();
-    let rows = stmt.query_map([], |row| {
-        let id: i64 = row.get(0)?;
-        let path: String = row.get(1)?;
-        let filename: String = row.get(2)?;
-        let model_type: String = row.get(3)?;
-        let size_bytes: i64 = row.get(4)?;
-        let base_model: Option<String> = row.get(5)?;
-        let description: Option<String> = row.get(6)?;
-        let tags_json: String = row.get(7)?;
-        let activation_json: String = row.get(8)?;
-        let thumbnail_path: Option<String> = row.get(9)?;
-        let cover_path: Option<String> = row.get(10)?;
-        let civitai_name: Option<String> = row.get(11)?;
-        let version_name: Option<String> = row.get(12)?;
-        Ok((id,path,filename,model_type,size_bytes,base_model,description,tags_json,activation_json,thumbnail_path,cover_path,civitai_name,version_name))
-    }).map_err(|e| format!("Could not read Raphael model records: {}", e))?;
-
-    for row in rows {
-        let (id,path,filename,model_type,size_bytes,base_model,description,tags_json,activation_json,thumbnail_path,cover_path,civitai_name,version_name) =
-            row.map_err(|e| format!("Could not decode Raphael model record: {}", e))?;
-        let Some(kind) = manager_model_type(&model_type) else { continue };
-        let model_path = PathBuf::from(&path);
-        if !model_path.exists() || !is_path_under(comfy_root, &model_path) {
-            continue;
-        }
-        let mut tags: Vec<String> = serde_json::from_str(&tags_json).unwrap_or_default();
-        let activation_tags: Vec<String> = serde_json::from_str(&activation_json).unwrap_or_default();
-        if tags.is_empty() && kind == "lora" && !activation_tags.is_empty() {
-            tags = activation_tags.clone();
-        }
-        let thumbnail = cover_path
-            .or(thumbnail_path)
-            .map(PathBuf::from)
-            .filter(|p| p.is_file())
-            .map(|p| p.to_string_lossy().to_string());
-
-        let character = is_character(&tags);
-        let model = ModelInfo {
-            id: format!("raphael-{}", id),
-            name: civitai_name.or(version_name).unwrap_or(filename),
-            kind: kind.to_string(),
-            path: model_path.to_string_lossy().to_string(),
-            size: size_bytes.max(0) as u64,
-            base_model,
-            tags,
-            activation_tags,
-            character,
-            thumbnail,
-            source: "raphael-model-manager".into(),
-            cache_name: None,
-            cache_description: description,
-        };
-        if kind == "checkpoint" {
-            checkpoints.push(model);
-        } else {
-            loras.push(model);
+    for chunk in lora_models.chunks(16) {
+        let hydrated = futures_util::stream::iter(chunk.iter().cloned())
+            .map(|model| {
+                let root = root.to_path_buf();
+                let base_url = base_url.clone();
+                let token = token.clone();
+                async move { hydrate_registry_model(model, &base_url, &token, &root).await }
+            })
+            .buffer_unordered(16);
+        tokio::pin!(hydrated);
+        while let Some(result) = hydrated.next().await {
+            if let Some(model) = result? {
+                loras.push(model);
+            }
         }
     }
 
-    Ok((checkpoints, loras))
-}
+    checkpoints.sort_by_key(|model| model.name.to_lowercase());
+    loras.sort_by_key(|model| model.name.to_lowercase());
 
-fn file_type_from_path(path: &Path, root: &Path) -> &'static str {
-    let rel = path.strip_prefix(root).unwrap_or(path);
-    let first = rel.components().next()
-        .and_then(|c| c.as_os_str().to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    match first.as_str() {
-        "checkpoints" | "checkpoint" | "diffusion_models" | "unet" | "unets" => "checkpoint",
-        "loras" | "lora" | "lycoris" => "lora",
-        _ => "",
+    let mut warnings = Vec::new();
+    if checkpoints.is_empty() {
+        warnings.push("The Registry has no available checkpoints whose registered files exist under the selected ComfyUI models root.".into());
     }
-}
-
-fn is_model_file(path: &Path) -> bool {
-    matches!(
-        path.extension().and_then(|x| x.to_str()).unwrap_or("").to_ascii_lowercase().as_str(),
-        "safetensors" | "ckpt" | "pt" | "pth" | "bin" | "gguf" | "onnx"
-    )
-}
-
-fn scan_disk(root: &Path) -> (Vec<ModelInfo>,Vec<ModelInfo>) {
-    let mut cps = Vec::new();
-    let mut ls = Vec::new();
-    if !root.exists() { return (cps, ls); }
-
-    for entry in WalkDir::new(root).follow_links(false).into_iter().filter_map(Result::ok) {
-        if !entry.file_type().is_file() || !is_model_file(entry.path()) { continue; }
-        let kind = file_type_from_path(entry.path(), root);
-        if kind.is_empty() { continue; }
-
-        let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-        let name = entry.path().file_stem().and_then(|x| x.to_str()).unwrap_or("model").to_string();
-        let model = ModelInfo {
-            id: "disk-".to_string() + &norm(&entry.path().to_string_lossy()),
-            name,
-            kind: kind.into(),
-            path: entry.path().to_string_lossy().to_string(),
-            size,
-            base_model: None,
-            tags: vec![],
-            activation_tags: vec![],
-            character: false,
-            thumbnail: None,
-            source: "comfyui".into(),
-            cache_name: None,
-            cache_description: None,
-        };
-        if kind == "checkpoint" { cps.push(model); } else { ls.push(model); }
+    if loras.is_empty() {
+        warnings.push("The Registry has no available LoRAs whose registered files exist under the selected ComfyUI models root.".into());
     }
-    (cps, ls)
+
+    Ok(LibrarySnapshot {
+        checkpoints,
+        loras,
+        source_roots: vec![req.comfy_root.clone(), base_url],
+        warnings,
+    })
 }
 
-fn merge_one(d:&mut ModelInfo,c:&ModelInfo){
-    if d.base_model.is_none(){d.base_model=c.base_model.clone();}
-    if d.tags.is_empty(){d.tags=c.tags.clone();}
-    if d.activation_tags.is_empty(){d.activation_tags=c.activation_tags.clone();}
-    if d.thumbnail.is_none(){d.thumbnail=c.thumbnail.clone();}
-    d.character|=c.character; d.cache_name=Some(c.name.clone());
-    if d.cache_description.is_none(){d.cache_description=c.cache_description.clone();}
-    d.source="merged".into();
-}
-
-fn merge(list:&mut Vec<ModelInfo>,cache:&[ModelInfo]){
-    for d in list.iter_mut(){
-        let dn=norm(&d.name); let dp=norm(&d.path);
-        if let Some(c)=cache.iter().find(|c|norm(&c.name)==dn||(!c.path.is_empty()&&norm(&c.path).ends_with(&dp))){merge_one(d,c);}
-    }
-}
-
-#[tauri::command]
 fn pick_folder()->Result<PickResult,String>{
     Ok(PickResult{path:rfd::FileDialog::new().pick_folder().map(|x|x.to_string_lossy().to_string())})
 }
@@ -451,83 +549,24 @@ fn pick_folder()->Result<PickResult,String>{
 #[derive(Debug, Serialize)]
 struct RaphaelConfig {
     models_root: Option<String>,
-    db_path: Option<String>,
+    registry_url: Option<String>,
 }
 
 #[tauri::command]
 fn discover_raphael_config() -> RaphaelConfig {
-    for db in manager_db_candidates(None) {
-        if !db.is_file() { continue; }
-        if let Ok(conn) = Connection::open_with_flags(&db, OpenFlags::SQLITE_OPEN_READ_ONLY) {
-            if let Ok(models_root) = conn.query_row(
-                "SELECT value FROM settings WHERE key='models_root'",
-                [],
-                |row| row.get::<_, String>(0)
-            ).optional() {
-                return RaphaelConfig {
-                    models_root,
-                    db_path: Some(db.to_string_lossy().to_string()),
-                };
-            }
-        }
-    }
-    RaphaelConfig { models_root: None, db_path: None }
+    let models_root = std::env::var("RAPHAEL_COMFY_MODELS_ROOT").ok();
+    let registry_url = Some(registry_base_url(None));
+    RaphaelConfig { models_root, registry_url }
 }
 
 #[tauri::command]
 fn discover_raphael_roots() -> Vec<String> {
-    manager_db_candidates(None)
-        .into_iter()
-        .filter_map(|p| p.parent().map(|x| x.to_string_lossy().to_string()))
-        .collect()
+    vec![registry_base_url(None)]
 }
 
 #[tauri::command]
-fn scan_library(req:ScanRequest)->Result<LibrarySnapshot,String>{
-    let root = Path::new(&req.comfy_root);
-    if !root.is_dir() {
-        return Err(format!("ComfyUI models root is not a folder: {}", req.comfy_root));
-    }
-
-    let (mut cps, mut ls) = scan_disk(root);
-    let mut roots = vec![req.comfy_root.clone()];
-    let mut manager_loaded = false;
-
-    for db in manager_db_candidates(req.raphael_root.as_deref()) {
-        match load_manager_models(&db, root) {
-            Ok((manager_cps, manager_loras)) if !manager_cps.is_empty() || !manager_loras.is_empty() => {
-                cps = manager_cps;
-                ls = manager_loras;
-                roots.push(db.to_string_lossy().to_string());
-                manager_loaded = true;
-                break;
-            }
-            Ok(_) => {}
-            Err(_) => {}
-        }
-    }
-
-    if !manager_loaded {
-        if let Some(rr)=req.raphael_root.as_deref().filter(|x|!x.trim().is_empty()) {
-            let cache=scan_cache(Path::new(rr));
-            roots.push(rr.to_string());
-            let cp:Vec<_>=cache.iter().filter(|x|x.kind=="checkpoint").cloned().collect();
-            let lr:Vec<_>=cache.iter().filter(|x|x.kind=="lora").cloned().collect();
-            merge(&mut cps,&cp);
-            merge(&mut ls,&lr);
-        }
-    }
-
-    cps.sort_by_key(|x| x.name.to_lowercase());
-    ls.sort_by_key(|x| x.name.to_lowercase());
-
-    let mut warnings=Vec::new();
-    if !manager_loaded {
-        warnings.push("Raphael Model Manager database was not found; using ComfyUI filesystem scan. Start/scan Raphael Model Manager or configure its raphael.db path for cached thumbnails, base metadata, tags and activation prompts.".into());
-    }
-    if cps.is_empty(){warnings.push("No checkpoints found under the selected ComfyUI models root.".into());}
-    if ls.is_empty(){warnings.push("No LoRAs found under the selected ComfyUI models root.".into());}
-    Ok(LibrarySnapshot{checkpoints:cps,loras:ls,source_roots:roots,warnings})
+async fn scan_library(req: ScanRequest) -> Result<LibrarySnapshot, String> {
+    scan_registry_library(&req).await
 }
 
 #[tauri::command]
@@ -545,81 +584,131 @@ async fn list_provider_models(settings:LlmSettings)->Result<Vec<String>,String>{
 fn random_one(values:&[&str])->String{values.choose(&mut rand::rng()).unwrap_or(&"").to_string()}
 
 #[tauri::command]
-fn prepare_generation(req:PrepareRequest)->Result<PreparedGeneration,String>{
-    let keys:Vec<String>=req.checkpoint.tags.iter().chain(req.checkpoint.base_model.iter()).chain(std::iter::once(&req.checkpoint.name)).map(|x|norm(x)).filter(|x|x.len()>2).collect();
-    let compatible:Vec<&ModelInfo>=req.loras.iter().filter(|l|{
-        let explicit=l.base_model.as_ref().map(|b|{let b=norm(b);keys.iter().any(|k|k==&b||k.contains(&b)||b.contains(k))}).unwrap_or(false);
-        let tagged=l.tags.iter().map(|t|norm(t)).any(|t|keys.iter().any(|k|k==&t||k.contains(&t)||t.contains(k)));
-        explicit||tagged
-    }).collect();
-    if compatible.is_empty(){return Err("No compatible LoRAs were found for the selected checkpoint.".into());}
+async fn prepare_generation(req: PrepareRequest) -> Result<PreparedGeneration, String> {
+    let (registry_url, token) = ensure_registry(None).await?;
 
-    let manual:Vec<&ModelInfo>=if req.selected_lora_ids.is_empty(){
-        Vec::new()
-    }else{
-        let picked:Vec<&ModelInfo>=req.selected_lora_ids.iter()
-            .filter_map(|id|compatible.iter().copied().find(|l|&l.id==id))
-            .collect();
-        if picked.len()!=req.selected_lora_ids.len(){
-            return Err("One or more manually selected LoRAs are no longer compatible with this checkpoint.".into());
+    let keys: Vec<String> = req.checkpoint.tags.iter()
+        .chain(req.checkpoint.base_model.iter())
+        .chain(std::iter::once(&req.checkpoint.name))
+        .map(|value| norm(value))
+        .filter(|value| value.len() > 2)
+        .collect();
+
+    let mut compatible_ids = std::collections::HashSet::new();
+
+    if req.selected_lora_ids.is_empty() {
+        let encoded_checkpoint = urlencoding::encode(&req.checkpoint.id);
+        let result: serde_json::Value = registry_json(
+            &registry_url, &token,
+            &format!("/api/v1/models/{encoded_checkpoint}/compatibility?type=lora")
+        ).await?;
+
+        if let Some(candidates) = result.get("candidates").and_then(|value| value.as_array()) {
+            for candidate in candidates {
+                if let Some(id) = candidate.get("id").and_then(|value| value.as_str()) {
+                    compatible_ids.insert(id.to_string());
+                }
+            }
         }
-        picked
-    };
+    } else {
+        for lora_id in &req.selected_lora_ids {
+            let checkpoint = urlencoding::encode(&req.checkpoint.id);
+            let lora = urlencoding::encode(lora_id);
+            let result: serde_json::Value = registry_json(
+                &registry_url, &token,
+                &format!("/api/v1/compatibility?checkpoint={checkpoint}&lora={lora}")
+            ).await?;
+            if result.get("compatible").and_then(|value| value.as_bool()) == Some(true) {
+                compatible_ids.insert(lora_id.clone());
+            } else {
+                return Err(format!("LoRA '{}' is not compatible with checkpoint '{}'.", lora_id, req.checkpoint.name));
+            }
+        }
+    }
 
-    let chars:Vec<&ModelInfo>=compatible.iter().copied().filter(|l|l.character||l.tags.iter().any(|t|norm(t)=="character")).collect();
-    if chars.is_empty(){return Err("No compatible character LoRA was found. Character identity is restricted to LoRAs marked with the character tag.".into());}
+    let compatible: Vec<&ModelInfo> = req.loras.iter()
+        .filter(|lora| compatible_ids.contains(&lora.id))
+        .collect();
 
-    let wanted=req.character.trim().to_lowercase();
-    let manual_character=manual.iter().copied().find(|l|l.character||l.tags.iter().any(|t|norm(t)=="character"));
-    if !wanted.is_empty() && manual_character.is_some() &&
-        !manual_character.unwrap().name.to_lowercase().contains(&wanted) &&
-        !manual_character.unwrap().tags.iter().any(|t|t.to_lowercase().contains(&wanted)) {
+    if compatible.is_empty() {
+        return Err("No compatible LoRAs were found in the Raphael Model Registry for the selected checkpoint.".into());
+    }
+
+    let manual: Vec<&ModelInfo> = req.selected_lora_ids.iter()
+        .filter_map(|id| compatible.iter().copied().find(|lora| &lora.id == id))
+        .collect();
+
+    let chars: Vec<&ModelInfo> = compatible.iter().copied()
+        .filter(|lora| lora.character || lora.tags.iter().any(|tag| norm(tag) == "character"))
+        .collect();
+
+    if chars.is_empty() {
+        return Err("No compatible character LoRA was found. Character identity is restricted to Registry models marked with the character tag.".into());
+    }
+
+    let wanted = req.character.trim().to_lowercase();
+    let manual_character = manual.iter().copied()
+        .find(|lora| lora.character || lora.tags.iter().any(|tag| norm(tag) == "character"));
+
+    if !wanted.is_empty() && manual_character.is_some()
+        && !manual_character.unwrap().name.to_lowercase().contains(&wanted)
+        && !manual_character.unwrap().tags.iter().any(|tag| tag.to_lowercase().contains(&wanted))
+    {
         return Err("The selected character LoRA does not match the requested character.".into());
     }
 
-    let character=if !wanted.is_empty(){
-        *chars.iter().find(|l|l.name.to_lowercase().contains(&wanted)||l.tags.iter().any(|t|t.to_lowercase().contains(&wanted))).ok_or("Requested character does not match a compatible character LoRA.")?
-    }else if let Some(l)=manual_character{
-        l
-    }else{
+    let character = if !wanted.is_empty() {
+        *chars.iter().find(|lora| {
+            lora.name.to_lowercase().contains(&wanted)
+                || lora.tags.iter().any(|tag| tag.to_lowercase().contains(&wanted))
+        }).ok_or("Requested character does not match a compatible Registry character LoRA.")?
+    } else if let Some(lora) = manual_character {
+        lora
+    } else {
         *chars.choose(&mut rand::rng()).unwrap()
     };
 
-    let chosen:Vec<&ModelInfo>=if !manual.is_empty(){
-        let mut picked=manual.clone();
-        if !picked.iter().any(|l|l.id==character.id){picked.insert(0,character);}
+    let chosen: Vec<&ModelInfo> = if !manual.is_empty() {
+        let mut picked = manual.clone();
+        if !picked.iter().any(|lora| lora.id == character.id) {
+            picked.insert(0, character);
+        }
         picked
-    }else{
-        let count=rand::rng().random_range(req.random_lora_min.max(1)..=req.random_lora_max.max(req.random_lora_min.max(1))) as usize;
-        let mut pool:Vec<&ModelInfo>=compatible.into_iter().filter(|x|x.id!=character.id).collect();
+    } else {
+        let min_count = req.random_lora_min.max(1);
+        let max_count = req.random_lora_max.max(min_count);
+        let count = rand::rng().random_range(min_count..=max_count) as usize;
+        let mut pool: Vec<&ModelInfo> = compatible.into_iter().filter(|lora| lora.id != character.id).collect();
         pool.shuffle(&mut rand::rng());
-        let mut picked=vec![character];
+        let mut picked = vec![character];
         picked.extend(pool.into_iter().take(count.saturating_sub(1)));
         picked
     };
 
-    let loras=chosen.into_iter().map(|l|SelectedLora{
-        id:l.id.clone(),name:l.name.clone(),path:l.path.clone(),
-        weight:rand::rng().random_range(0.65..=1.0),
-        activation_tags:l.activation_tags.clone(),
-        tags:l.tags.clone(),
-        description:l.cache_description.clone(),
-        character:l.character||l.tags.iter().any(|t|norm(t)=="character"),
-        base_model:l.base_model.clone()
+    let loras = chosen.into_iter().map(|lora| SelectedLora {
+        id: lora.id.clone(),
+        name: lora.name.clone(),
+        path: lora.path.clone(),
+        weight: rand::rng().random_range(0.65..=1.0),
+        activation_tags: lora.activation_tags.clone(),
+        tags: lora.tags.clone(),
+        description: lora.cache_description.clone(),
+        character: lora.character || lora.tags.iter().any(|tag| norm(tag) == "character"),
+        base_model: lora.base_model.clone(),
     }).collect();
 
-    let scene=SceneSelection{
-        setting:if req.setting.trim().is_empty(){random_one(&["rooftop at blue hour","rainy neon alley","quiet shrine at dawn","sunlit train platform","moonlit forest clearing","coastal city street after rain"])}else{req.setting.trim().into()},
-        pose:if req.pose.trim().is_empty(){random_one(&["standing naturally","walking forward","sitting with one knee raised","looking over the shoulder","dynamic three-quarter pose","leaning against a wall"])}else{req.pose.trim().into()},
-        expression:if req.expression.trim().is_empty(){random_one(&["soft smile","confident","curious","slightly mischievous","calm","surprised"])}else{req.expression.trim().into()},
-        character:character.name.clone(),
-        dress:if req.dress.trim().is_empty(){random_one(&["modern casual outfit","layered streetwear","school uniform","elegant dress","light summer clothes","fantasy-inspired outfit"])}else{req.dress.trim().into()},
-        composition:if req.composition.trim().is_empty(){random_one(&["full body","three-quarter shot","medium shot","cinematic wide shot","portrait crop"])}else{req.composition.trim().into()},
+    let scene = SceneSelection {
+        setting: if req.setting.trim().is_empty() { random_one(&["rooftop at blue hour","rainy neon alley","quiet shrine at dawn","sunlit train platform","moonlit forest clearing","coastal city street after rain"]) } else { req.setting.trim().into() },
+        pose: if req.pose.trim().is_empty() { random_one(&["standing naturally","walking forward","sitting with one knee raised","looking over the shoulder","dynamic three-quarter pose","leaning against a wall"]) } else { req.pose.trim().into() },
+        expression: if req.expression.trim().is_empty() { random_one(&["soft smile","confident","curious","slightly mischievous","calm","surprised"]) } else { req.expression.trim().into() },
+        character: character.name.clone(),
+        dress: if req.dress.trim().is_empty() { random_one(&["modern casual outfit","layered streetwear","school uniform","elegant dress","light summer clothes","fantasy-inspired outfit"]) } else { req.dress.trim().into() },
+        composition: if req.composition.trim().is_empty() { random_one(&["full body","three-quarter shot","medium shot","cinematic wide shot","portrait crop"]) } else { req.composition.trim().into() },
     };
-    Ok(PreparedGeneration{checkpoint:req.checkpoint,loras,scene,compatibility_keys:keys})
+
+    Ok(PreparedGeneration { checkpoint: req.checkpoint, loras, scene, compatibility_keys: keys })
 }
 
-#[tauri::command]
 async fn stream_llm(
     state:tauri::State<'_,AppState>,
     req:LlmRequest,
@@ -1236,11 +1325,11 @@ async fn web_command(
         }
         "scan_library"=>{
             let request=serde_json::from_value::<ScanRequest>(req_value).map_err(|e|e.to_string())?;
-            serde_json::to_value(scan_library(request)?).map_err(|e|e.to_string())
+            serde_json::to_value(scan_library(request).await?).map_err(|e|e.to_string())
         }
         "prepare_generation"=>{
             let request=serde_json::from_value::<PrepareRequest>(req_value).map_err(|e|e.to_string())?;
-            serde_json::to_value(prepare_generation(request)?).map_err(|e|e.to_string())
+            serde_json::to_value(prepare_generation(request).await?).map_err(|e|e.to_string())
         }
         "parse_prompt_pair"=>{
             let raw=req_value.as_str().ok_or_else(||"raw prompt text is required".to_string())?;
@@ -1353,12 +1442,47 @@ fn append_history(app:AppHandle,payload:Value)->Result<HistoryRecord,String>{
 }
 
 #[tauri::command]
-fn path_to_data_url(path:String)->Result<String,String>{
-    let bytes=fs::read(&path).map_err(|e|e.to_string())?;
-    let mime=match Path::new(&path).extension().and_then(|x|x.to_str()).unwrap_or("").to_lowercase().as_str(){"png"=>"image/png","jpg"|"jpeg"=>"image/jpeg","webp"=>"image/webp","gif"=>"image/gif",_=>"application/octet-stream"};
-    Ok(format!("data:{};base64,{}",mime,base64::engine::general_purpose::STANDARD.encode(bytes)))
-}
+async fn path_to_data_url(path: String) -> Result<String, String> {
+    if let Some(reference) = path.strip_prefix("registry://") {
+        let mut parts = reference.splitn(2, '/');
+        let model_id = parts.next().unwrap_or_default();
+        let asset_id = parts.next().unwrap_or_default();
+        if model_id.is_empty() || asset_id.is_empty() {
+            return Err("Invalid Registry asset reference.".into());
+        }
 
+        let (base_url, token) = ensure_registry(None).await?;
+        let response = reqwest::Client::new()
+            .get(format!("{}/api/v1/models/{}/assets/{}/content", base_url, urlencoding::encode(model_id), urlencoding::encode(asset_id)))
+            .bearer_auth(token)
+            .header("x-raphael-actor", "image-generator")
+            .send()
+            .await
+            .map_err(|error| format!("Registry asset request failed: {error}"))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            return Err(format!("Registry asset request returned HTTP {status}"));
+        }
+
+        let mime = response.headers().get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("image/png")
+            .split(';').next().unwrap_or("image/png").to_string();
+        let bytes = response.bytes().await.map_err(|error| format!("Registry asset read failed: {error}"))?;
+        return Ok(format!("data:{};base64,{}", mime, base64::engine::general_purpose::STANDARD.encode(bytes)));
+    }
+
+    let bytes = fs::read(&path).map_err(|e| e.to_string())?;
+    let mime = match Path::new(&path).extension().and_then(|x| x.to_str()).unwrap_or("").to_lowercase().as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        _ => "application/octet-stream",
+    };
+    Ok(format!("data:{};base64,{}", mime, base64::engine::general_purpose::STANDARD.encode(bytes)))
+}
 
 #[tauri::command]
 async fn start_web_host(app:AppHandle,state:tauri::State<'_,AppState>,port:Option<u16>)->Result<Value,String>{
