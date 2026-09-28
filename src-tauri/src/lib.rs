@@ -275,6 +275,10 @@ fn registry_executable_candidates() -> Vec<PathBuf> {
             candidates.push(dir.join("resources").join(executable_name));
             candidates.push(dir.join("registry").join(executable_name));
             candidates.push(dir.join("bin").join(executable_name));
+            if let Some(parent) = dir.parent() {
+                candidates.push(parent.join("Raphael-Model-Registry").join("target").join("debug").join(executable_name));
+                candidates.push(parent.join("Raphael-Model-Registry").join("target").join("release").join(executable_name));
+            }
             ancestor = dir.parent().map(Path::to_path_buf);
         }
     }
