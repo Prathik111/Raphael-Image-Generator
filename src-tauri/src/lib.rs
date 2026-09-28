@@ -513,10 +513,10 @@ async fn scan_registry_library(req: &ScanRequest) -> Result<LibrarySnapshot, Str
     for chunk in lora_models.chunks(16) {
         let hydrated = futures_util::stream::iter(chunk.iter().cloned())
             .map(|model| {
-                let root = root.to_path_buf();
+                let root = root.map(Path::to_path_buf);
                 let base_url = base_url.clone();
                 let token = token.clone();
-                async move { hydrate_registry_model(model, &base_url, &token, &root).await }
+                async move { hydrate_registry_model(model, &base_url, &token, root.as_deref()).await }
             })
             .buffer_unordered(16);
         tokio::pin!(hydrated);
@@ -551,6 +551,8 @@ async fn scan_registry_library(req: &ScanRequest) -> Result<LibrarySnapshot, Str
     })
 }
 
+
+#[tauri::command]
 fn pick_folder()->Result<PickResult,String>{
     Ok(PickResult{path:rfd::FileDialog::new().pick_folder().map(|x|x.to_string_lossy().to_string())})
 }
@@ -718,6 +720,7 @@ async fn prepare_generation(req: PrepareRequest) -> Result<PreparedGeneration, S
     Ok(PreparedGeneration { checkpoint: req.checkpoint, loras, scene, compatibility_keys: keys })
 }
 
+#[tauri::command]
 async fn stream_llm(
     state:tauri::State<'_,AppState>,
     req:LlmRequest,
@@ -1377,7 +1380,7 @@ async fn web_command(
             let path=req_value.get("path").and_then(|x|x.as_str())
                 .or_else(||req_value.as_str())
                 .ok_or_else(||"path is required".to_string())?;
-            serde_json::to_value(path_to_data_url(path.to_string())?).map_err(|e|e.to_string())
+            serde_json::to_value(path_to_data_url(path.to_string()).await?).map_err(|e|e.to_string())
         }
         _=>Err(format!("Unknown API command: {}",command))
         }
