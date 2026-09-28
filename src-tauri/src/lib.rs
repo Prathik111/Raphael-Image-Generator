@@ -178,6 +178,7 @@ struct AppState {
 #[derive(Clone)]
 struct WebApiState {
     app: AppHandle,
+    llm: Arc<Mutex<LlmSettings>>,
 }
 
 fn norm(s: &str) -> String { s.trim().to_lowercase().replace([' ', '_', '-', '.', '/'], "") }
@@ -1315,7 +1316,7 @@ async fn web_command(
     AxumJson(body):AxumJson<Value>,
 )->Response{
     if command=="stream_llm" {
-        return web_stream_llm(AxumJson(body)).await.into_response();
+        return web_stream_llm(state.clone(), AxumJson(body)).await.into_response();
     }
     if command=="monitor_comfy_generation" {
         return web_monitor_comfy(AxumJson(body)).await.into_response();
@@ -1327,9 +1328,17 @@ async fn web_command(
         "discover_raphael_config"=>serde_json::to_value(discover_raphael_config()).map_err(|e|e.to_string()),
         "discover_raphael_roots"=>serde_json::to_value(discover_raphael_roots()).map_err(|e|e.to_string()),
         "list_provider_models"=>{
-            let settings=serde_json::from_value::<LlmSettings>(req_value).map_err(|e|e.to_string())?;
-            let models=list_provider_models(settings).await?;
+            let settings = state.llm.lock().await.clone();
+            let models=list_provider_models(settings.clone()).await?;
             serde_json::to_value(models).map_err(|e|e.to_string())
+        }
+        "get_host_llm_config"=>{
+            let settings = state.llm.lock().await.clone();
+            serde_json::to_value(json!({
+                "provider": settings.provider,
+                "baseUrl": settings.base_url,
+                "model": settings.model
+            })).map_err(|e|e.to_string())
         }
         "scan_library"=>{
             let request=serde_json::from_value::<ScanRequest>(req_value).map_err(|e|e.to_string())?;
@@ -1377,9 +1386,17 @@ async fn web_command(
 }
 
 async fn web_stream_llm(
+    state: WebApiState,
     AxumJson(body):AxumJson<Value>,
 )->Sse<impl Stream<Item=Result<Event,std::convert::Infallible>>>{
-    let req:Result<LlmRequest,String>=serde_json::from_value(body.get("req").cloned().unwrap_or(body.clone())).map_err(|e|e.to_string());
+    let host_settings = state.llm.blocking_lock().clone();
+    let parsed:Result<LlmRequest,String>=serde_json::from_value(body.get("req").cloned().unwrap_or(body.clone())).map_err(|e|e.to_string());
+    let req = parsed.map(|mut request| {
+        request.settings.provider = host_settings.provider.clone();
+        request.settings.base_url = host_settings.base_url.clone();
+        request.settings.api_key = host_settings.api_key.clone();
+        request
+    });
     let (tx,rx)=tokio::sync::mpsc::unbounded_channel::<Result<Event,std::convert::Infallible>>();
     tokio::spawn(async move{
         match req{
@@ -1493,9 +1510,17 @@ async fn path_to_data_url(path: String) -> Result<String, String> {
 }
 
 #[tauri::command]
-async fn start_web_host(app:AppHandle,state:tauri::State<'_,AppState>,port:Option<u16>)->Result<Value,String>{
+async fn start_web_host(
+    app: AppHandle,
+    state: tauri::State<'_,AppState>,
+    port: Option<u16>,
+    llm_settings: Option<LlmSettings>,
+)->Result<Value,String>{
     let mut host=state.web_host.lock().await;
     if let Some(existing)=host.as_ref(){
+        if let Some(settings) = llm_settings {
+            *existing.llm.lock().await = settings;
+        }
         return Ok(json!({"running":true,"port":existing.port,"localUrl":existing.lan_url,"lanUrl":existing.lan_url}));
     }
 
@@ -1511,7 +1536,16 @@ async fn start_web_host(app:AppHandle,state:tauri::State<'_,AppState>,port:Optio
         .map_err(|e|format!("LAN host could not bind {}:{}: {}",lan_host,chosen_port,e))?;
     let actual_port=listener.local_addr().map_err(|e|e.to_string())?.port();
     let dist=dist_directory(&app).ok_or("Could not find dist/index.html. Run npm run build first.")?;
-    let api_state=WebApiState{app:app.clone()};
+    let llm = Arc::new(Mutex::new(llm_settings.unwrap_or_else(|| LlmSettings {
+        provider: "ollama".into(),
+        base_url: "http://127.0.0.1:11434".into(),
+        api_key: String::new(),
+        model: String::new(),
+        temperature: 0.72,
+        max_tokens: 8192,
+        context_tokens: 32768,
+    })));
+    let api_state=WebApiState{app:app.clone(),llm:llm.clone()};
     let router=Router::new()
         .route("/api/{command}",post(web_command))
         .fallback_service(ServeDir::new(dist))
@@ -1521,8 +1555,18 @@ async fn start_web_host(app:AppHandle,state:tauri::State<'_,AppState>,port:Optio
         let _=axum::serve(listener,router).await;
     });
     let url=json!({"running":true,"port":actual_port,"localUrl":lan,"lanUrl":lan});
-    *host=Some(WebHostRuntime{port:actual_port,lan_url:lan,task});
+    *host=Some(WebHostRuntime{port:actual_port,lan_url:lan,llm,task});
     Ok(url)
+}
+
+#[tauri::command]
+async fn update_web_host_llm(state:tauri::State<'_,AppState>,llm_settings:LlmSettings)->Result<(),String>{
+    let host=state.web_host.lock().await;
+    let Some(runtime)=host.as_ref() else {
+        return Err("LAN web host is not running.".into());
+    };
+    *runtime.llm.lock().await = llm_settings;
+    Ok(())
 }
 
 #[tauri::command]
@@ -1538,7 +1582,7 @@ pub fn run(){
         .invoke_handler(tauri::generate_handler![
             pick_folder,discover_raphael_config,discover_raphael_roots,scan_library,list_provider_models,
             prepare_generation,stream_llm,parse_prompt_pair,finalize_prompt_pair,build_workflow,inject_prompts,
-            submit_to_comfy,monitor_comfy_generation,load_history,append_history,path_to_data_url,start_web_host,stop_web_host
+            submit_to_comfy,monitor_comfy_generation,load_history,append_history,path_to_data_url,start_web_host,update_web_host_llm,stop_web_host
         ])
         .run(tauri::generate_context!())
         .expect("error while running Raphael Prompt Forge");
