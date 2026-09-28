@@ -1491,7 +1491,11 @@ async fn web_command(
             serde_json::to_value(prepare_generation(request).await?).map_err(|e|e.to_string())
         }
         "parse_prompt_pair"=>{
-            let raw=req_value.as_str().ok_or_else(||"raw prompt text is required".to_string())?;
+            let raw=body
+                .get("raw")
+                .and_then(|value|value.as_str())
+                .or_else(||req_value.as_str())
+                .ok_or_else(||"raw prompt text is required".to_string())?;
             serde_json::to_value(parse_prompt_pair(raw.to_string())?).map_err(|e|e.to_string())
         }
         "finalize_prompt_pair"=>{
