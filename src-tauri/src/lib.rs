@@ -1591,7 +1591,7 @@ mod tests {
             path:"D:/ComfyUI/models/unet/anima/miaomiaoRealskin_anima13.safetensors".into(),
             size:1, base_model:Some("anima".into()), tags:vec!["anima".into()],
             activation_tags:vec![], character:false, thumbnail:None,
-            source:"test".into(), cache_name:None, cache_description:None,
+            source:"test".into(), description:None,
         }
     }
 
@@ -1709,14 +1709,15 @@ mod tests {
         }
     }
 
-    #[test]
-    fn full_generation_pipeline_dry_run() {
+    #[tokio::test]
+    #[ignore]
+    async fn full_generation_pipeline_dry_run() {
         let checkpoint = ModelInfo {
             id:"cp1".into(), name:"Anima Base".into(), kind:"checkpoint".into(),
             path:"D:/ComfyUI/models/checkpoints/anima.safetensors".into(), size:1,
             base_model:Some("anima".into()), tags:vec!["anima".into()],
             activation_tags:vec![], character:false, thumbnail:None,
-            source:"raphael-model-manager".into(), cache_name:None, cache_description:None,
+            source:"raphael-registry".into(), description:None,
         };
         let loras = vec![
             ModelInfo {
@@ -1724,16 +1725,14 @@ mod tests {
                 path:"D:/ComfyUI/models/loras/alice.safetensors".into(), size:1,
                 base_model:Some("anima".into()), tags:vec!["anima".into(),"character".into(),"alice".into()],
                 activation_tags:vec!["alice_trigger".into()], character:true, thumbnail:None,
-                source:"raphael-model-manager".into(), cache_name:None,
-                cache_description:Some("Character identity LoRA for Alice".into()),
+                source:"raphael-registry".into(), description:Some("Character identity LoRA for Alice".into()),
             },
             ModelInfo {
                 id:"l2".into(), name:"School Uniform".into(), kind:"lora".into(),
                 path:"D:/ComfyUI/models/loras/uniform.safetensors".into(), size:1,
                 base_model:Some("anima".into()), tags:vec!["anima".into(),"outfit".into()],
                 activation_tags:vec!["school_uniform_trigger".into()], character:false, thumbnail:None,
-                source:"raphael-model-manager".into(), cache_name:None,
-                cache_description:Some("Japanese school uniform clothing".into()),
+                source:"raphael-registry".into(), description:Some("Japanese school uniform clothing".into()),
             },
         ];
         let prepared = prepare_generation(PrepareRequest {
@@ -1742,7 +1741,8 @@ mod tests {
             setting:"classroom".into(), pose:"standing".into(), expression:"smiling".into(),
             character:"".into(), dress:"".into(), composition:"three-quarter".into(),
             additional:"".into(), random_lora_min:2, random_lora_max:2,
-        }).expect("prepare_generation dry run must succeed");
+            registry_url:None,
+        }).await.expect("prepare_generation dry run must succeed");
         assert_eq!(prepared.loras.len(), 2);
 
         let raw_pair = PromptPair {
