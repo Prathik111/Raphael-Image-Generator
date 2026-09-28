@@ -238,9 +238,21 @@ fn registry_data_dir() -> PathBuf {
     if let Some(value) = std::env::var_os("RAPHAEL_REGISTRY_DATA_DIR") {
         return PathBuf::from(value);
     }
+    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+        return PathBuf::from(local_app_data)
+            .join("Raphael")
+            .join("ModelRegistry")
+            .join("data");
+    }
     directories::ProjectDirs::from("com", "Raphael", "ModelRegistry")
-        .map(|dirs| dirs.data_dir().to_path_buf())
-        .unwrap_or_else(|| PathBuf::from(".raphael-model-registry"))
+        .map(|dirs| dirs.data_dir().join("data"))
+        .unwrap_or_else(|| PathBuf::from(".raphael-model-registry").join("data"))
+}
+
+fn registry_token_path(data_dir: &Path) -> PathBuf {
+    std::env::var_os("RAPHAEL_REGISTRY_TOKEN_FILE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| data_dir.join("registry.token"))
 }
 
 fn registry_token(data_dir: &Path) -> Result<String, String> {
@@ -250,9 +262,8 @@ fn registry_token(data_dir: &Path) -> Result<String, String> {
             return Ok(value);
         }
     }
-    let path = std::env::var_os("RAPHAEL_REGISTRY_TOKEN_FILE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| data_dir.join("registry.token"));
+
+    let path = registry_token_path(data_dir);
     let value = fs::read_to_string(&path)
         .map_err(|error| format!("Raphael Model Registry token could not be read from {}: {}", path.display(), error))?
         .trim()
@@ -321,11 +332,27 @@ async fn registry_health(base_url: &str) -> bool {
 async fn ensure_registry(override_url: Option<&str>) -> Result<(String, String), String> {
     let base_url = registry_base_url(override_url);
     let data_dir = registry_data_dir();
+    let token_file = registry_token_path(&data_dir);
 
     if !registry_health(&base_url).await {
         let executable = registry_executable()?;
-        Command::new(&executable)
+        let mut command = Command::new(&executable);
+        command
             .arg("server")
+            .env("RAPHAEL_REGISTRY_DATA_DIR", &data_dir);
+
+        if let Ok(value) = std::env::var("RAPHAEL_REGISTRY_AUTH_TOKEN") {
+            if !value.trim().is_empty() {
+                command.env("RAPHAEL_REGISTRY_AUTH_TOKEN", value.trim());
+            }
+        } else if let Ok(value) = fs::read_to_string(&token_file) {
+            let value = value.trim();
+            if !value.is_empty() {
+                command.env("RAPHAEL_REGISTRY_AUTH_TOKEN", value);
+            }
+        }
+
+        command
             .spawn()
             .map_err(|error| format!("Could not start Raphael Model Registry from {}: {}", executable.display(), error))?;
 
