@@ -383,6 +383,9 @@ function App(){
       setSelectedLoraIds(current=>current.filter(id=>ids.has(id)));
       setManualLoraIds(current=>current.filter(id=>ids.has(id)));
       setStageStatus('library','done');
+      if(snap.warnings.length){
+        setError(snap.warnings.join(' '));
+      }
       setToast(snap.checkpoints.length + ' checkpoints · ' + snap.loras.length + ' LoRAs');
     }catch(e){
       setStageStatus('library','error');
