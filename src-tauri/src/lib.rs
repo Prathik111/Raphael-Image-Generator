@@ -549,7 +549,7 @@ fn discover_raphael_config() -> RaphaelConfig {
 }
 
 #[tauri::command]
-fn discover_registry_urls() -> Vec<String> {
+fn discover_raphael_roots() -> Vec<String> {
     vec![registry_base_url(None)]
 }
 
