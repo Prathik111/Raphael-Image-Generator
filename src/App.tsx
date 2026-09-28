@@ -322,8 +322,19 @@ function App(){
       const config=await apiInvoke<{models_root:string|null;registry_url:string|null}>('discover_raphael_config');
       if(config.models_root) setComfyRoot(config.models_root);
       if(config.registry_url) setRegistryUrl(config.registry_url);
+
+      if(!isTauriRuntime){
+        const hostLlm=await apiInvoke<{provider:ProviderKind;baseUrl:string;model:string}>('get_host_llm_config');
+        const nextLlm={...llm,provider:hostLlm.provider,baseUrl:hostLlm.baseUrl,model:hostLlm.model || ''};
+        setLlm(nextLlm);
+        setGenerationDraft(d=>({...d,llm:{...d.llm,provider:hostLlm.provider,baseUrl:hostLlm.baseUrl,model:hostLlm.model || ''}}));
+        await fetchModels(nextLlm);
+      }
+
       await scan(config.models_root || comfyRoot,config.registry_url || undefined);
-    }catch{}
+    }catch(e){
+      if(!isTauriRuntime) setError(String(e));
+    }
   }
 
   async function loadHistory(){
@@ -393,6 +404,9 @@ function App(){
     setSteps(Math.max(1,draft.steps));
     setCfg(Math.max(0,draft.cfg));
     setSampler(draft.sampler || 'euler');
+    if(webHost && isTauriRuntime){
+      void apiInvoke('update_web_host_llm',{llmSettings:draft.llm}).catch(e=>setWebHostError(String(e)));
+    }
     setSettingsOpen(false);
     setToast('Generation settings saved');
   }
@@ -701,7 +715,7 @@ function App(){
     setWebHostBusy(true);
     setWebHostError('');
     try{
-      const info=await apiInvoke<WebHostInfo>('start_web_host',{port:1424});
+      const info=await apiInvoke<WebHostInfo>('start_web_host',{port:1424,llmSettings:llm});
       setWebHost(info);
       setToast('LAN host ready · ' + info.lanUrl);
     }catch(e){
