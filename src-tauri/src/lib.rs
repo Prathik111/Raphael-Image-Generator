@@ -250,7 +250,9 @@ fn registry_token(data_dir: &Path) -> Result<String, String> {
             return Ok(value);
         }
     }
-    let path = data_dir.join("registry.token");
+    let path = std::env::var_os("RAPHAEL_REGISTRY_TOKEN_FILE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| data_dir.join("registry.token"));
     let value = fs::read_to_string(&path)
         .map_err(|error| format!("Raphael Model Registry token could not be read from {}: {}", path.display(), error))?
         .trim()
@@ -456,10 +458,10 @@ async fn hydrate_registry_model(
     let tags_future = registry_json::<Vec<String>>(base_url, token, &tags_path);
     let assets_future = registry_json::<Vec<RegistryAsset>>(base_url, token, &assets_path);
     let (versions, files, tags, assets) = tokio::join!(versions_future, files_future, tags_future, assets_future);
-    let versions = versions?;
-    let files = files?;
-    let tags = tags?;
-    let assets = assets?;
+    let versions = versions.unwrap_or_default();
+    let files = files.unwrap_or_default();
+    let tags = tags.unwrap_or_default();
+    let assets = assets.unwrap_or_default();
 
     let latest_version = versions.first();
     let base_model = latest_version.and_then(|version| version.base_model.clone()).or_else(|| model.base_model.clone());
@@ -516,6 +518,8 @@ async fn scan_registry_library(req: &ScanRequest) -> Result<LibrarySnapshot, Str
     let mut checkpoints = Vec::new();
     let mut loras = Vec::new();
 
+    let mut hydration_failures = 0usize;
+
     for chunk in checkpoint_models.chunks(16) {
         let hydrated = futures_util::stream::iter(chunk.iter().cloned())
             .map(|model| {
@@ -527,8 +531,10 @@ async fn scan_registry_library(req: &ScanRequest) -> Result<LibrarySnapshot, Str
             .buffer_unordered(16);
         tokio::pin!(hydrated);
         while let Some(result) = hydrated.next().await {
-            if let Some(model) = result? {
-                checkpoints.push(model);
+            match result {
+                Ok(Some(model)) => checkpoints.push(model),
+                Ok(None) => {}
+                Err(_) => hydration_failures += 1,
             }
         }
     }
@@ -544,8 +550,10 @@ async fn scan_registry_library(req: &ScanRequest) -> Result<LibrarySnapshot, Str
             .buffer_unordered(16);
         tokio::pin!(hydrated);
         while let Some(result) = hydrated.next().await {
-            if let Some(model) = result? {
-                loras.push(model);
+            match result {
+                Ok(Some(model)) => loras.push(model),
+                Ok(None) => {}
+                Err(_) => hydration_failures += 1,
             }
         }
     }
@@ -559,6 +567,12 @@ async fn scan_registry_library(req: &ScanRequest) -> Result<LibrarySnapshot, Str
     }
     if loras.is_empty() {
         warnings.push("The Raphael Model Registry returned no LoRA records.".into());
+    }
+    if hydration_failures > 0 {
+        warnings.push(format!(
+            "{} Registry model records could not be fully hydrated; available catalog records remain visible.",
+            hydration_failures
+        ));
     }
 
     let mut source_roots = vec![base_url];
