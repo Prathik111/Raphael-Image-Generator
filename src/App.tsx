@@ -200,7 +200,7 @@ function App(){
   const [library,setLibrary]=useState<LibrarySnapshot|null>(null);
   const [selectedId,setSelectedId]=useState('');
   const [comfyRoot,setComfyRoot]=useState('D:\\ComfyUI\\models');
-  const [raphaelRoot,setRaphaelRoot]=useState('');
+  const [registryUrl,setRegistryUrl]=useState('');
   const [comfyUrl,setComfyUrl]=useState('http://127.0.0.1:8188');
 
   const [constraints,setConstraints]=useState<Constraints>(emptyConstraints);
@@ -319,9 +319,9 @@ function App(){
 
   async function discoverRoots(){
     try{
-      const config=await apiInvoke<{models_root:string|null;db_path:string|null}>('discover_raphael_config');
+      const config=await apiInvoke<{models_root:string|null;registry_url:string|null}>('discover_raphael_config');
       if(config.models_root) setComfyRoot(config.models_root);
-      if(config.db_path) setRaphaelRoot(config.db_path);
+      if(config.registry_url) setRegistryUrl(config.registry_url);
       if(config.models_root) await scan(config.models_root,config.db_path || undefined);
     }catch{}
   }
@@ -348,13 +348,13 @@ function App(){
     }
   }
 
-  async function scan(rootOverride=comfyRoot,raphaelOverride=raphaelRoot || undefined){
+  async function scan(rootOverride=comfyRoot,registryOverride=registryUrl || undefined){
     setError('');
     setStage('library');
     setStageStatus('library','running');
     try{
       const snap=await apiInvoke<LibrarySnapshot>('scan_library',{
-        req:{comfyRoot:rootOverride,raphaelRoot:raphaelOverride || null},
+        req:{comfyRoot:rootOverride,registryUrl:registryOverride || null},
       });
       setLibrary(snap);
       if(!selectedId && snap.checkpoints[0]) setSelectedId(snap.checkpoints[0].id);
@@ -972,7 +972,7 @@ function App(){
         <div className="right-section-head"><span>BACKEND</span></div>
         <label className="compact-field"><span>COMFYUI API</span><input value={comfyUrl} onChange={e=>setComfyUrl(e.target.value)}/></label>
         <label className="compact-field"><span>MODELS ROOT</span><input value={comfyRoot} onChange={e=>setComfyRoot(e.target.value)}/></label>
-        <label className="compact-field"><span>RAPHAEL DB / CACHE</span><input value={raphaelRoot} onChange={e=>setRaphaelRoot(e.target.value)}/></label>
+        <label className="compact-field"><span>REGISTRY URL</span><input value={registryUrl} onChange={e=>setRegistryUrl(e.target.value)}/></label>
         <button className="secondary-btn full" onClick={()=>void scan()}><RefreshCw size={13}/> SCAN LIBRARY</button>
       </div>
     </aside>
