@@ -165,6 +165,7 @@ struct HistoryRecord { id: String, timestamp: String, payload: Value }
 struct WebHostRuntime {
     port: u16,
     lan_url: String,
+    llm: Arc<Mutex<LlmSettings>>,
     task: tokio::task::JoinHandle<()>,
 }
 
