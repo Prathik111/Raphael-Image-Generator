@@ -1389,7 +1389,7 @@ async fn web_stream_llm(
     state: WebApiState,
     AxumJson(body):AxumJson<Value>,
 )->Sse<impl Stream<Item=Result<Event,std::convert::Infallible>>>{
-    let host_settings = state.llm.blocking_lock().clone();
+    let host_settings = state.llm.lock().await.clone();
     let parsed:Result<LlmRequest,String>=serde_json::from_value(body.get("req").cloned().unwrap_or(body.clone())).map_err(|e|e.to_string());
     let req = parsed.map(|mut request| {
         request.settings.provider = host_settings.provider.clone();
