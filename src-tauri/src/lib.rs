@@ -380,43 +380,64 @@ async fn registry_models(base_url: &str, token: &str, endpoint: &str) -> Result<
 }
 
 fn registry_model_file_path(file: &RegistryFile, comfy_root: Option<&Path>) -> Option<PathBuf> {
+    // Registry is authoritative for the model's registered path. Prefer a real
+    // host file when it exists, but never discard a Registry model merely
+    // because its file cannot currently be resolved from the guessed root.
     let root = comfy_root
         .filter(|path| path.is_dir())
         .and_then(|path| path.canonicalize().ok());
 
     let registry_path = PathBuf::from(&file.path);
-    if registry_path.is_absolute() && registry_path.is_file() {
-        let canonical = registry_path.canonicalize().unwrap_or(registry_path);
-        return Some(canonical);
+    if registry_path.is_absolute() {
+        if registry_path.is_file() {
+            return Some(registry_path.canonicalize().unwrap_or(registry_path));
+        }
+        return Some(registry_path);
     }
 
-    let Some(root) = root else {
-        return None;
-    };
+    if let Some(root) = root {
+        let mut candidates = Vec::new();
+        if !file.path.is_empty() {
+            candidates.push(root.join(&file.path));
+        }
+        if let Some(relative) = &file.relative_path {
+            candidates.push(root.join(relative));
+            let normalized = relative.replace('\\', "/");
+            if let Some(stripped) = normalized.strip_prefix("models/") {
+                candidates.push(root.join(stripped));
+            }
+        }
+        candidates.push(root.join(&file.filename));
 
-    let mut candidates = Vec::new();
-    if !file.path.is_empty() {
-        candidates.push(root.join(&file.path));
-    }
-    if let Some(relative) = &file.relative_path {
-        candidates.push(root.join(relative));
-        let normalized = relative.replace('\\', "/");
-        if let Some(stripped) = normalized.strip_prefix("models/") {
-            candidates.push(root.join(stripped));
+        for candidate in candidates {
+            if candidate.is_file() {
+                let canonical = candidate.canonicalize().unwrap_or(candidate);
+                if canonical.starts_with(&root) {
+                    return Some(canonical);
+                }
+            }
         }
-    }
-    candidates.push(root.join(&file.filename));
 
-    for candidate in candidates {
-        if !candidate.is_file() {
-            continue;
+        // Preserve a usable host-relative path for Registry-only metadata.
+        if let Some(relative) = file.relative_path.as_deref().filter(|value| !value.trim().is_empty()) {
+            return Some(root.join(relative));
         }
-        let canonical = candidate.canonicalize().unwrap_or(candidate);
-        if canonical.starts_with(&root) {
-            return Some(canonical);
+        if !file.path.trim().is_empty() {
+            return Some(root.join(&file.path));
+        }
+        if !file.filename.trim().is_empty() {
+            return Some(root.join(&file.filename));
         }
     }
-    None
+
+    if !file.path.trim().is_empty() {
+        return Some(PathBuf::from(&file.path));
+    }
+    file.relative_path
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from)
+        .or_else(|| (!file.filename.trim().is_empty()).then(|| PathBuf::from(&file.filename)))
 }
 
 async fn hydrate_registry_model(
@@ -453,9 +474,7 @@ async fn hydrate_registry_model(
             .filter(|file| file.status.eq_ignore_ascii_case("available"))
             .find_map(|file| registry_model_file_path(file, comfy_root)));
 
-    let Some(file_path) = selected_file else {
-        return Ok(None);
-    };
+    let file_path = selected_file.unwrap_or_else(|| PathBuf::from(&model.name));
 
     let size = files.iter()
         .find(|file| registry_model_file_path(file, comfy_root).as_deref() == Some(file_path.as_path()))
@@ -536,10 +555,10 @@ async fn scan_registry_library(req: &ScanRequest) -> Result<LibrarySnapshot, Str
 
     let mut warnings = Vec::new();
     if checkpoints.is_empty() {
-        warnings.push("The Registry has no available checkpoints whose registered files exist under the selected ComfyUI models root.".into());
+        warnings.push("The Raphael Model Registry returned no checkpoint records.".into());
     }
     if loras.is_empty() {
-        warnings.push("The Registry has no available LoRAs whose registered files exist under the selected ComfyUI models root.".into());
+        warnings.push("The Raphael Model Registry returned no LoRA records.".into());
     }
 
     let mut source_roots = vec![base_url];
