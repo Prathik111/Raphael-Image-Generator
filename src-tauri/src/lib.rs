@@ -34,6 +34,7 @@ struct ModelInfo {
     #[serde(default)] character: bool,
     #[serde(default)] thumbnail: Option<String>,
     #[serde(default)] source: String,
+    #[serde(default)] description: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
