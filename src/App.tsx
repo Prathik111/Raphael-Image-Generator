@@ -307,6 +307,9 @@ function App(){
   useEffect(()=>{
     void loadHistory();
     void discoverRoots();
+    if(isTauriRuntime){
+      void refreshModels();
+    }
   },[]);
 
   useEffect(()=>{
