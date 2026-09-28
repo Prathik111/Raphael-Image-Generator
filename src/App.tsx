@@ -322,7 +322,7 @@ function App(){
       const config=await apiInvoke<{models_root:string|null;registry_url:string|null}>('discover_raphael_config');
       if(config.models_root) setComfyRoot(config.models_root);
       if(config.registry_url) setRegistryUrl(config.registry_url);
-      if(config.models_root) await scan(config.models_root,config.db_path || undefined);
+      if(config.models_root) await scan(config.models_root,config.registry_url || undefined);
     }catch{}
   }
 
