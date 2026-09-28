@@ -431,6 +431,7 @@ function App(){
           selectedLoraIds:combinedIds,
           ...constraints,
           randomLoraMax:Math.min(maxLoras,constraints.randomLoraMax),
+          registryUrl:registryUrl || null,
         },
       });
       setPrepared(result);
