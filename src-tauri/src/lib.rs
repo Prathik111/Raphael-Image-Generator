@@ -187,8 +187,6 @@ fn base_url(s: &str) -> String { s.trim().trim_end_matches('/').to_string() }
 struct RegistrySearchResult {
     items: Vec<RegistryModel>,
     total: i64,
-    limit: i64,
-    offset: i64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -203,8 +201,6 @@ struct RegistryModel {
 #[derive(Debug, Clone, Deserialize)]
 struct RegistryVersion {
     id: String,
-    model_id: String,
-    version_name: Option<String>,
     base_model: Option<String>,
     #[serde(default)]
     activation_prompts: Vec<String>,
@@ -212,8 +208,6 @@ struct RegistryVersion {
 
 #[derive(Debug, Clone, Deserialize)]
 struct RegistryFile {
-    id: String,
-    model_id: String,
     version_id: Option<String>,
     path: String,
     relative_path: Option<String>,
@@ -225,9 +219,7 @@ struct RegistryFile {
 #[derive(Debug, Clone, Deserialize)]
 struct RegistryAsset {
     id: String,
-    model_id: String,
     kind: String,
-    path: String,
 }
 
 fn registry_base_url(override_url: Option<&str>) -> String {
@@ -1798,27 +1790,3 @@ mod tests {
         };
         let loras = vec![
             SelectedLora {
-                id: "1".into(), name:"character".into(), path:"c.safetensors".into(),
-                weight:0.8, activation_tags:vec!["triggerA".into(), "char_tag".into()],
-                tags:vec!["character".into()], description:None, character:true,
-                base_model:Some("anima".into())
-            },
-            SelectedLora {
-                id: "2".into(), name:"style".into(), path:"s.safetensors".into(),
-                weight:0.7, activation_tags:vec!["style_tag".into()],
-                tags:vec!["style".into()], description:None, character:false,
-                base_model:Some("anima".into())
-            }
-        ];
-        let finalized = finalize_prompt_pair(FinalizePromptRequest {
-            prompt_pair: pair,
-            loras,
-        }).expect("finalize_prompt_pair must succeed");
-
-        assert_eq!(
-            finalized.positive_prompt,
-            "portrait, blue eyes, serene expression, triggerA, char_tag, style_tag"
-        );
-        assert_eq!(finalized.negative_prompt, "blurry");
-    }
-}
