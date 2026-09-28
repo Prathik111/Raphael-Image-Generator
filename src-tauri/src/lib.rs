@@ -91,6 +91,7 @@ struct PrepareRequest {
     setting: String, pose: String, expression: String, character: String,
     dress: String, composition: String, additional: String,
     random_lora_min: u32, random_lora_max: u32,
+    #[serde(default)] registry_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -574,7 +575,7 @@ fn random_one(values:&[&str])->String{values.choose(&mut rand::rng()).unwrap_or(
 
 #[tauri::command]
 async fn prepare_generation(req: PrepareRequest) -> Result<PreparedGeneration, String> {
-    let (registry_url, token) = ensure_registry(None).await?;
+    let (registry_url, token) = ensure_registry(req.registry_url.as_deref()).await?;
 
     let keys: Vec<String> = req.checkpoint.tags.iter()
         .chain(req.checkpoint.base_model.iter())
