@@ -184,6 +184,41 @@ struct WebApiState {
 fn norm(s: &str) -> String { s.trim().to_lowercase().replace([' ', '_', '-', '.', '/'], "") }
 fn base_url(s: &str) -> String { s.trim().trim_end_matches('/').to_string() }
 
+fn is_character_lora_for_checkpoint(
+    lora: &ModelInfo,
+    checkpoint: &ModelInfo,
+) -> bool {
+    let character_tagged = lora.character
+        || lora.tags.iter().any(|tag| norm(tag) == "character");
+    if !character_tagged {
+        return false;
+    }
+
+    let base_keys: Vec<String> = std::iter::once(checkpoint.base_model.as_deref().unwrap_or(""))
+        .chain(checkpoint.tags.iter().map(String::as_str))
+        .map(norm)
+        .filter(|value| value.len() > 2)
+        .collect();
+
+    if base_keys.is_empty() {
+        return true;
+    }
+
+    let lora_keys: Vec<String> = std::iter::once(lora.base_model.as_deref().unwrap_or(""))
+        .chain(lora.tags.iter().map(String::as_str))
+        .map(norm)
+        .filter(|value| value.len() > 2)
+        .collect();
+
+    lora_keys.iter().any(|lora_key| {
+        base_keys.iter().any(|base_key| {
+            lora_key == base_key
+                || lora_key.contains(base_key)
+                || base_key.contains(lora_key)
+        })
+    })
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct RegistrySearchResult {
     items: Vec<RegistryModel>,
@@ -745,16 +780,19 @@ async fn prepare_generation(req: PrepareRequest) -> Result<PreparedGeneration, S
         .collect();
 
     let chars: Vec<&ModelInfo> = compatible.iter().copied()
-        .filter(|lora| lora.character || lora.tags.iter().any(|tag| norm(tag) == "character"))
+        .filter(|lora| is_character_lora_for_checkpoint(lora, &req.checkpoint))
         .collect();
 
     if chars.is_empty() {
-        return Err("No compatible character LoRA was found. Character identity is restricted to Registry models marked with the character tag.".into());
+        return Err(
+            "No compatible character LoRA was found for the selected checkpoint base model. Random LoRA selection requires at least one Registry character LoRA matching the checkpoint base-model tag."
+                .into()
+        );
     }
 
     let wanted = req.character.trim().to_lowercase();
     let manual_character = manual.iter().copied()
-        .find(|lora| lora.character || lora.tags.iter().any(|tag| norm(tag) == "character"));
+        .find(|lora| is_character_lora_for_checkpoint(lora, &req.checkpoint));
 
     if !wanted.is_empty() && manual_character.is_some()
         && !manual_character.unwrap().name.to_lowercase().contains(&wanted)
