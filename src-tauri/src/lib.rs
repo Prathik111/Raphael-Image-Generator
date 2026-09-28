@@ -545,9 +545,15 @@ async fn hydrate_registry_model(
         .map(|file| file.size_bytes.max(0) as u64)
         .unwrap_or(0);
 
+    // Registry supports thumbnail, cover, preview and gallery assets. Prefer
+    // the dedicated thumbnail/cover records, then fall back to preview/gallery
+    // for older Registry projections that did not classify the cached image as
+    // a thumbnail yet.
     let thumbnail = assets.iter()
         .find(|asset| asset.kind.eq_ignore_ascii_case("thumbnail"))
         .or_else(|| assets.iter().find(|asset| asset.kind.eq_ignore_ascii_case("cover")))
+        .or_else(|| assets.iter().find(|asset| asset.kind.eq_ignore_ascii_case("preview")))
+        .or_else(|| assets.iter().find(|asset| asset.kind.eq_ignore_ascii_case("gallery")))
         .map(|asset| format!("registry://{}/{}", model.id, asset.id));
 
     Ok(Some(ModelInfo {
