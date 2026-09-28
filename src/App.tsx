@@ -171,6 +171,30 @@ function isCompatibleLoraUi(
   return explicit || tagged;
 }
 
+function isCharacterLoraForCheckpoint(
+  lora:LibrarySnapshot['loras'][number],
+  checkpoint:LibrarySnapshot['checkpoints'][number],
+){
+  const characterTagged = lora.character || lora.tags.some(tag=>normUi(tag)==='character');
+  if(!characterTagged) return false;
+
+  const baseKeys=[checkpoint.baseModel || '',...checkpoint.tags]
+    .map(normUi)
+    .filter(x=>x.length>2);
+
+  if(!baseKeys.length) return true;
+
+  const loraKeys=[lora.baseModel || '',...lora.tags]
+    .map(normUi)
+    .filter(x=>x.length>2);
+
+  return loraKeys.some(loraKey=>
+    baseKeys.some(baseKey=>
+      loraKey===baseKey || loraKey.includes(baseKey) || baseKey.includes(loraKey)
+    )
+  );
+}
+
 function promptNeedsExpansion(pair:PromptPair){
   const positive=pair.positive_prompt.trim();
   const words=positive.split(/\s+/).filter(Boolean).length;
@@ -431,16 +455,49 @@ function App(){
     setError('');
 
     const manualIds=manualLoraIds.filter(id=>allLoras.some(lora=>lora.id===id));
+    const manualHasCharacter=manualIds.some(id=>{
+      const lora=allLoras.find(item=>item.id===id);
+      return !!lora && isCharacterLoraForCheckpoint(lora,selected);
+    });
+
     const minCount=Math.max(1,Math.min(maxLoras,constraints.randomLoraMin));
     const maxCount=Math.max(minCount,Math.min(maxLoras,constraints.randomLoraMax));
     const randomTarget=Math.floor(Math.random()*(maxCount-minCount+1))+minCount;
-    const targetCount=Math.max(manualIds.length,randomTarget);
-    const availablePool=compatibleLoras
+
+    const requiredCount=Math.max(
+      randomTarget,
+      manualIds.length + (manualHasCharacter ? 0 : 1),
+    );
+    if(requiredCount>maxLoras){
+      setError('Increase MAX LoRAs by at least one slot so the random stack can include a character LoRA for the selected base model.');
+      return null;
+    }
+
+    const characterPool=compatibleLoras
       .filter(lora=>!manualIds.includes(lora.id))
+      .filter(lora=>isCharacterLoraForCheckpoint(lora,selected))
       .sort(()=>Math.random()-0.5);
 
-    const randomSlots=Math.max(0,Math.min(maxLoras,targetCount)-manualIds.length);
-    const randomIds=availablePool.slice(0,randomSlots).map(lora=>lora.id);
+    const availablePool=compatibleLoras
+      .filter(lora=>!manualIds.includes(lora.id))
+      .filter(lora=>!isCharacterLoraForCheckpoint(lora,selected))
+      .sort(()=>Math.random()-0.5);
+
+    const randomSlots=Math.max(0,Math.min(maxLoras,requiredCount)-manualIds.length);
+    const randomIds:string[]=[];
+
+    if(!manualHasCharacter){
+      const character=characterPool[0];
+      if(!character){
+        setError('No compatible character LoRA was found for the selected base model in the Registry.');
+        return null;
+      }
+      randomIds.push(character.id);
+    }
+
+    const remainingSlots=Math.max(0,randomSlots-randomIds.length);
+    randomIds.push(...availablePool.slice(0,remainingSlots).map(lora=>lora.id));
+
     const combinedIds=[...manualIds,...randomIds];
 
     setSelectedLoraIds(combinedIds);
