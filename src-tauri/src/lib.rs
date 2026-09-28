@@ -23,7 +23,6 @@ use tokio::time::{sleep, timeout};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tokio_stream::{wrappers::UnboundedReceiverStream, Stream};
 use tower_http::services::ServeDir;
-use walkdir::WalkDir;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -35,8 +34,6 @@ struct ModelInfo {
     #[serde(default)] character: bool,
     #[serde(default)] thumbnail: Option<String>,
     #[serde(default)] source: String,
-    #[serde(default)] cache_name: Option<String>,
-    #[serde(default)] cache_description: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -460,8 +457,7 @@ async fn hydrate_registry_model(
         character: tags.iter().any(|tag| norm(tag) == "character"),
         thumbnail,
         source: "raphael-registry".into(),
-        cache_name: None,
-        cache_description: model.description,
+        description: model.description,
     }))
 }
 
@@ -552,7 +548,7 @@ fn discover_raphael_config() -> RaphaelConfig {
 }
 
 #[tauri::command]
-fn discover_raphael_roots() -> Vec<String> {
+fn discover_registry_urls() -> Vec<String> {
     vec![registry_base_url(None)]
 }
 
@@ -684,7 +680,7 @@ async fn prepare_generation(req: PrepareRequest) -> Result<PreparedGeneration, S
         weight: rand::rng().random_range(0.65..=1.0),
         activation_tags: lora.activation_tags.clone(),
         tags: lora.tags.clone(),
-        description: lora.cache_description.clone(),
+        description: lora.description.clone(),
         character: lora.character || lora.tags.iter().any(|tag| norm(tag) == "character"),
         base_model: lora.base_model.clone(),
     }).collect();
