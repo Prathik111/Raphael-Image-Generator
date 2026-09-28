@@ -272,14 +272,21 @@ function App(){
     [library,selectedId],
   );
 
+  const allLoras=useMemo(
+    ()=>library?.loras || [],
+    [library],
+  );
+
+  // Compatibility is used for automatic/random selection only.
+  // The selector itself exposes the complete Registry LoRA inventory.
   const compatibleLoras=useMemo(
-    ()=>library && selected ? library.loras.filter(lora=>isCompatibleLoraUi(lora,selected)) : [],
-    [library,selected],
+    ()=>library && selected ? allLoras.filter(lora=>isCompatibleLoraUi(lora,selected)) : [],
+    [allLoras,library,selected],
   );
 
   const manualLoras=useMemo(
-    ()=>compatibleLoras.filter(lora=>manualLoraIds.includes(lora.id)),
-    [compatibleLoras,manualLoraIds],
+    ()=>allLoras.filter(lora=>manualLoraIds.includes(lora.id)),
+    [allLoras,manualLoraIds],
   );
 
   const filteredCheckpoints=useMemo(()=>{
@@ -292,10 +299,10 @@ function App(){
 
   const filteredLoras=useMemo(()=>{
     const q=loraSearch.trim().toLowerCase();
-    return compatibleLoras.filter(lora =>
+    return allLoras.filter(lora =>
       !q || [lora.name,lora.baseModel || '',...lora.tags].join(' ').toLowerCase().includes(q)
     );
-  },[compatibleLoras,loraSearch]);
+  },[allLoras,loraSearch]);
 
   useEffect(()=>{
     void loadHistory();
@@ -421,7 +428,7 @@ function App(){
     }
     setError('');
 
-    const manualIds=manualLoraIds.filter(id=>compatibleLoras.some(lora=>lora.id===id));
+    const manualIds=manualLoraIds.filter(id=>allLoras.some(lora=>lora.id===id));
     const minCount=Math.max(1,Math.min(maxLoras,constraints.randomLoraMin));
     const maxCount=Math.max(minCount,Math.min(maxLoras,constraints.randomLoraMax));
     const randomTarget=Math.floor(Math.random()*(maxCount-minCount+1))+minCount;
@@ -976,7 +983,7 @@ function App(){
       </div>
 
       <div className="right-section lora-section">
-        <div className="right-section-head"><span>LORAS</span><span>{selectedLoraIds.length} / {compatibleLoras.length}</span></div>
+        <div className="right-section-head"><span>LORAS</span><span>{selectedLoraIds.length} / {allLoras.length}</span></div>
         <div className="search-row compact"><Search size={13}/><input value={loraSearch} onChange={e=>setLoraSearch(e.target.value)} placeholder="Search LoRAs"/></div>
         <div className="lora-list">
           {filteredLoras.map(lora=><button key={lora.id} className={'lora-row ' + (selectedLoraIds.includes(lora.id) ? 'selected' : '')} onClick={()=>toggleLora(lora.id)}>
