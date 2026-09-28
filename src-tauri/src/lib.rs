@@ -1870,3 +1870,27 @@ mod tests {
         };
         let loras = vec![
             SelectedLora {
+                id: "1".into(), name:"character".into(), path:"c.safetensors".into(),
+                weight:0.8, activation_tags:vec!["triggerA".into(), "char_tag".into()],
+                tags:vec!["character".into()], description:None, character:true,
+                base_model:Some("anima".into())
+            },
+            SelectedLora {
+                id: "2".into(), name:"style".into(), path:"s.safetensors".into(),
+                weight:0.7, activation_tags:vec!["style_tag".into()],
+                tags:vec!["style".into()], description:None, character:false,
+                base_model:Some("anima".into())
+            }
+        ];
+        let finalized = finalize_prompt_pair(FinalizePromptRequest {
+            prompt_pair: pair,
+            loras,
+        }).expect("finalize_prompt_pair must succeed");
+
+        assert_eq!(
+            finalized.positive_prompt,
+            "portrait, blue eyes, serene expression, triggerA, char_tag, style_tag"
+        );
+        assert_eq!(finalized.negative_prompt, "blurry");
+    }
+}
