@@ -38,6 +38,32 @@ const defaultDemographicPrompts: DemographicPrompts = {
   'no-limits':'Do not add additional content restrictions beyond the application, model, platform and system requirements already in force.',
 };
 
+
+const demographicPromptsStorageKey = 'raphael-image-generator.demographic-prompts.v1';
+
+function loadPersistedDemographicPrompts(): DemographicPrompts {
+  if(typeof window === 'undefined') return defaultDemographicPrompts;
+  try {
+    const raw=window.localStorage.getItem(demographicPromptsStorageKey);
+    if(!raw) return defaultDemographicPrompts;
+    const parsed=JSON.parse(raw) as Partial<DemographicPrompts>;
+    if(
+      typeof parsed.safe !== 'string' ||
+      typeof parsed.suggestive !== 'string' ||
+      typeof parsed.explicit !== 'string' ||
+      typeof parsed['no-limits'] !== 'string'
+    ) return defaultDemographicPrompts;
+    return {
+      safe:parsed.safe,
+      suggestive:parsed.suggestive,
+      explicit:parsed.explicit,
+      'no-limits':parsed['no-limits'],
+    };
+  } catch {
+    return defaultDemographicPrompts;
+  }
+}
+
 const stages: Array<{key: Stage; label: string}> = [
   {key:'library',label:'LIBRARY'},
   {key:'compatibility',label:'COMPATIBILITY'},
@@ -230,7 +256,7 @@ function App(){
   const [constraints,setConstraints]=useState<Constraints>(emptyConstraints);
   const [systemPrompt,setSystemPrompt]=useState(defaultSystemPrompt);
   const [demographic,setDemographic]=useState<DemographicLevel>('safe');
-  const [demographicPrompts,setDemographicPrompts]=useState<DemographicPrompts>(defaultDemographicPrompts);
+  const [demographicPrompts,setDemographicPrompts]=useState<DemographicPrompts>(loadPersistedDemographicPrompts);
   const [maxLoras,setMaxLoras]=useState(4);
   const [width,setWidth]=useState(1024);
   const [height,setHeight]=useState(1024);
@@ -259,7 +285,7 @@ function App(){
   const [settingsOpen,setSettingsOpen]=useState(false);
   const [generationDraft,setGenerationDraft]=useState({
     llm,
-    systemPrompt,
+    systemPrompt:demographicPrompts[demographic],
     demographic,
     demographicPrompts,
     maxLoras,
@@ -431,9 +457,13 @@ function App(){
     setProvider(draft.llm.provider);
     setLlm({...draft.llm,provider:draft.llm.provider});
     setConstraints(nextConstraints);
-    setSystemPrompt(draft.systemPrompt);
+    setSystemPrompt(draft.demographicPrompts[draft.demographic]);
     setDemographic(draft.demographic);
-    setDemographicPrompts({...draft.demographicPrompts});
+    const savedDemographicPrompts={...draft.demographicPrompts};
+    setDemographicPrompts(savedDemographicPrompts);
+    try{
+      window.localStorage.setItem(demographicPromptsStorageKey,JSON.stringify(savedDemographicPrompts));
+    }catch{}
     setMaxLoras(cappedMax);
     setWidth(Math.max(64,draft.width));
     setHeight(Math.max(64,draft.height));
@@ -593,10 +623,9 @@ function App(){
         'DESCRIPTION: ' + (l.description || '(none)')
       ).join('\n\n');
 
-      const combinedSystemPrompt=[
-        systemPrompt,
-        'DEMOGRAPHIC POLICY (' + demographic.toUpperCase() + '):\n' + demographicPrompts[demographic],
-      ].filter(Boolean).join('\n\n');
+      // Each generation mode has exactly one system prompt. Never combine it
+      // with the legacy/global system prompt or another demographic policy.
+      const selectedSystemPrompt=demographicPrompts[demographic];
 
       const userPrompt=
         'CHECKPOINT: ' + prep.checkpoint.name + '\n' +
@@ -615,7 +644,7 @@ function App(){
 
       await streamLlm({
         settings:llm,
-        systemPrompt:combinedSystemPrompt,
+        systemPrompt:selectedSystemPrompt,
         userPrompt,
       },event=>{
         streamText.current+=event;
@@ -631,7 +660,7 @@ function App(){
           'EXPANSION PASS. The previous positive prompt was too short or omitted important scene information. Remove any checkpoint names, model filenames, LoRA names or activation syntax from the visual prompt. Rewrite it from scratch as ONE long, coherent, single comma-separated positive prompt of 90-160 words with at least 18 meaningful visual clauses. Explicitly include subject identity, visible appearance, current state, action/activity, body pose, hands/arms, head direction, gaze, facial expression, emotional state, clothing/accessories, interaction with surroundings, setting, background/environment, atmosphere, camera viewpoint, shot type, framing, perspective, depth, lighting direction/quality, color/mood, materials/textures and finishing details. Do not rely on any LoRA to provide expression, pose, state, background or composition. Preserve the same character and scene constraints. Also provide a 20-35 item targeted negative prompt. Return JSON only.';
         await streamLlm({
           settings:llm,
-          systemPrompt:combinedSystemPrompt,
+          systemPrompt:selectedSystemPrompt,
           userPrompt:expansionPrompt + '\n\nPREVIOUS JSON:\n' + JSON.stringify(rawPair),
         },event=>{
           streamText.current+=event;
@@ -708,7 +737,8 @@ function App(){
 
       const historySettings:GenerationSettings={
         llm:{...llm,apiKey:llm.apiKey ? '••••••••' : ''},
-        systemPrompt,
+        // Keep the history record explicit about the exact system prompt that was used.
+        systemPrompt:demographicPrompts[demographic],
         demographic,
         demographicPrompts:{...demographicPrompts},
         maxLoras,
@@ -1097,11 +1127,6 @@ function App(){
               <label className="wide-field"><span>MAX TOKENS</span><input type="number" min={128} max={16384} value={generationDraft.llm.maxTokens} onChange={e=>setGenerationDraft(d=>({...d,llm:{...d.llm,maxTokens:Math.max(128,Number(e.target.value))}}))}/></label>
               <label className="wide-field"><span>CONTEXT TOKENS</span><input type="number" min={2048} max={131072} step={1024} value={generationDraft.llm.contextTokens} onChange={e=>setGenerationDraft(d=>({...d,llm:{...d.llm,contextTokens:Math.max(2048,Number(e.target.value))}}))}/></label>
             </div>
-          </section>
-
-          <section className="settings-section">
-            <div className="settings-section-title">SYSTEM PROMPT</div>
-            <textarea className="settings-textarea tall" value={generationDraft.systemPrompt} onChange={e=>setGenerationDraft(d=>({...d,systemPrompt:e.target.value}))}/>
           </section>
 
           <section className="settings-section">
