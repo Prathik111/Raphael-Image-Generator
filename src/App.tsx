@@ -29,7 +29,7 @@ const defaultSystemPrompt =
   'The positive prompt must explicitly describe: subject identity and visible appearance; current state and action/activity; body pose; hands and arms; head direction and gaze; facial expression and emotional state; clothing and important accessories; interaction with objects or surroundings; setting/location; background and environment; foreground elements when useful; time of day; weather or atmosphere when relevant; camera viewpoint; shot type and framing; perspective; depth and spatial arrangement; lighting direction and quality; color palette and mood; materials and texture; and important finishing details. Expression, state, pose, background, environment and composition must be written as normal scene language even when LoRAs are present. ' +
   'Preserve explicit scene constraints exactly when possible. Resolve conflicts by prioritizing explicit scene constraints, then character identity, then compatible LoRA concepts. Order the positive prompt from subject/identity, to action/state, appearance, pose/expression, clothing, environment/background, composition/camera, lighting, and finishing details. ' +
   'The negative prompt should be a useful comma-separated list of roughly 20-35 targeted failure terms, including anatomy, hands, facial quality, composition and rendering problems relevant to the requested scene. ' +
-  'Do not output LoRA names, checkpoint names, model filenames, base-model labels, activation words, angle-bracket LoRA syntax, bracketed LoRA syntax, weights, implementation details, headings, markdown or commentary outside the required JSON object. A model or LoRA name may appear only when it is itself a genuine visual concept the user explicitly requested. Return JSON only with positive_prompt, negative_prompt, rationale.';
+  'For every selected LoRA, use its documented activation prompt(s) as exact generation input. Each activation prompt must appear in the final positive prompt at least once, unchanged, and should be placed naturally near the concept it activates; never append all activation prompts as a block at the end. Do not invent, paraphrase, reorder the words inside, or omit documented activation prompts. Do not output LoRA names, checkpoint names, model filenames, base-model labels, angle-bracket LoRA syntax, bracketed LoRA syntax, weights, implementation details, headings, markdown or commentary outside the required JSON object. A model or LoRA name may appear only when it is itself a genuine visual concept the user explicitly requested. Return JSON only with positive_prompt, negative_prompt, rationale.';
 
 const defaultDemographicPrompts: DemographicPrompts = {
   safe:'Keep all generated content non-sexual, non-explicit and suitable for general audiences. Avoid nudity and sexualized framing.',
@@ -620,7 +620,8 @@ function App(){
         'TYPE: ' + (l.character ? 'CHARACTER IDENTITY' : 'SUPPORTING CONCEPT') + '\n' +
         'BASE MODEL: ' + (l.baseModel || 'unknown') + '\n' +
         'TAGS: ' + (l.tags.length ? l.tags.join(', ') : '(none)') + '\n' +
-        'DESCRIPTION: ' + (l.description || '(none)')
+        'DESCRIPTION: ' + (l.description || '(none)') + '\n' +
+        'ACTIVATION PROMPT(S): ' + (l.activationTags.length ? l.activationTags.join(' | ') : '(none)')
       ).join('\n\n');
 
       // Each generation mode has exactly one system prompt. Never combine it
@@ -640,7 +641,7 @@ function App(){
         'DRESS: ' + prep.scene.dress + '\n' +
         'COMPOSITION: ' + prep.scene.composition + '\n' +
         'EXTRA: ' + (constraints.additional || '(none)') + '\n\n' +
-        'Write ONE long, detailed positive prompt as a single comma-separated string. Target 90-160 words and at least 18 meaningful clauses. Do not give a short summary. Do not mention checkpoint/model names, filenames, base-model labels, LoRA names or activation syntax in the visual prompt. Explicitly cover subject state/action, pose, hands/arms, head direction, gaze, facial expression, emotional state, clothing/accessories, interaction, setting, background/environment, atmosphere, camera viewpoint, framing, perspective, depth, lighting, color/mood, materials and finishing details. These scene facts must be written directly; do not assume a LoRA will provide them. Write a useful 20-35 item negative prompt. Return JSON only.';
+        'Write the FINAL positive and negative prompts that will be sent directly to the image model. The positive prompt must be one long, coherent, single comma-separated string of 90-160 words and at least 18 meaningful visual clauses. Use the selected LoRA metadata as actual prompt-building input, not as reference-only information. For every documented activation prompt, include the exact activation phrase in the positive prompt at least once, unchanged, and place it naturally next to the visual concept it activates instead of collecting activation prompts at the end. The LoRA description explains what visual concept the activation prompt controls; use that description to decide where and how that activation phrase belongs. Do not invent or paraphrase activation prompts, and do not omit them. Do not expose LoRA implementation syntax such as <lora:...> or weighted [LoRA - ...] notation. Do not mention checkpoint/model names, filenames or base-model labels. Explicitly cover subject state/action, pose, hands/arms, head direction, gaze, facial expression, emotional state, clothing/accessories, interaction, setting, background/environment, atmosphere, camera viewpoint, framing, perspective, depth, lighting, color/mood, materials and finishing details. These scene facts must be written directly; do not assume a LoRA will provide them. The negative prompt should be a useful 20-35 item comma-separated list targeted to the actual image and selected LoRAs. Return JSON only.';
 
       await streamLlm({
         settings:llm,
@@ -657,11 +658,14 @@ function App(){
         streamText.current='';
         flushSync(()=>setStream(''));
         const expansionPrompt=
-          'EXPANSION PASS. The previous positive prompt was too short or omitted important scene information. Remove any checkpoint names, model filenames, LoRA names or activation syntax from the visual prompt. Rewrite it from scratch as ONE long, coherent, single comma-separated positive prompt of 90-160 words with at least 18 meaningful visual clauses. Explicitly include subject identity, visible appearance, current state, action/activity, body pose, hands/arms, head direction, gaze, facial expression, emotional state, clothing/accessories, interaction with surroundings, setting, background/environment, atmosphere, camera viewpoint, shot type, framing, perspective, depth, lighting direction/quality, color/mood, materials/textures and finishing details. Do not rely on any LoRA to provide expression, pose, state, background or composition. Preserve the same character and scene constraints. Also provide a 20-35 item targeted negative prompt. Return JSON only.';
+          'EXPANSION PASS. Rewrite the previous result as the final production prompt pair. Preserve every required scene constraint and every documented LoRA activation prompt. Each activation prompt must appear exactly as documented, at least once, in a natural location beside the visual concept described by its LoRA, not as an appended block at the end. Use the LoRA descriptions to understand the intended visual effect. Do not remove or paraphrase activation prompts. Remove checkpoint names, model filenames, LoRA names and implementation syntax such as <lora:...> or weighted [LoRA - ...] notation. Rewrite the positive prompt as ONE long, coherent, single comma-separated prompt of 90-160 words with at least 18 meaningful visual clauses. Explicitly include subject identity, visible appearance, current state, action/activity, body pose, hands/arms, head direction, gaze, facial expression, emotional state, clothing/accessories, interaction with surroundings, setting, background/environment, atmosphere, camera viewpoint, shot type, framing, perspective, depth, lighting direction/quality, color/mood, materials/textures and finishing details. Do not rely on any LoRA to provide expression, pose, state, background or composition. Also provide a targeted 20-35 item negative prompt. Return JSON only.';
         await streamLlm({
           settings:llm,
           systemPrompt:selectedSystemPrompt,
-          userPrompt:expansionPrompt + '\n\nPREVIOUS JSON:\n' + JSON.stringify(rawPair),
+          userPrompt:
+            expansionPrompt +
+            '\n\nSELECTED LoRA METADATA:\n' + loraMetadata +
+            '\n\nPREVIOUS JSON:\n' + JSON.stringify(rawPair),
         },event=>{
           streamText.current+=event;
           flushSync(()=>setStream(streamText.current));
