@@ -1035,21 +1035,6 @@ fn parse_prompt_pair(raw:String)->Result<PromptPair,String>{
     }
 }
 
-fn strip_exact_ci(text:&str, needle:&str)->String{
-    if needle.trim().is_empty(){return text.to_string();}
-    let lower=text.to_lowercase();
-    let needle_lower=needle.to_lowercase();
-    let mut out=String::with_capacity(text.len());
-    let mut cursor=0usize;
-    while let Some(rel)=lower[cursor..].find(&needle_lower){
-        let start=cursor+rel;
-        out.push_str(&text[cursor..start]);
-        cursor=start+needle.len();
-    }
-    out.push_str(&text[cursor..]);
-    out
-}
-
 fn strip_generated_lora_syntax(text:&str)->String{
     let mut out=text.to_string();
 
@@ -1112,34 +1097,22 @@ fn strip_generated_lora_syntax(text:&str)->String{
         .join(" ")
 }
 
-fn finalize_positive_prompt(raw:&str, loras:&[SelectedLora])->String{
-    let mut positive=strip_generated_lora_syntax(raw).trim().trim_matches(',').trim().to_string();
-    let mut triggers=Vec::new();
-    for lora in loras {
-        for tag in &lora.activation_tags {
-            let tag=tag.trim();
-            if tag.is_empty(){continue;}
-            positive=strip_exact_ci(&positive,tag);
-            if !triggers.iter().any(|x:&String|x.eq_ignore_ascii_case(tag)){
-                triggers.push(tag.to_string());
-            }
-        }
-    }
-    positive=positive
+fn finalize_positive_prompt(raw:&str)->String{
+    strip_generated_lora_syntax(raw)
+        .trim()
+        .trim_matches(',')
+        .trim()
         .split(',')
         .map(str::trim)
         .filter(|x|!x.is_empty())
         .collect::<Vec<_>>()
-        .join(", ");
-    if triggers.is_empty(){return positive;}
-    if positive.is_empty(){return triggers.join(", ");}
-    format!("{}, {}",positive,triggers.join(", "))
+        .join(", ")
 }
 
 #[tauri::command]
 fn finalize_prompt_pair(req:FinalizePromptRequest)->Result<PromptPair,String>{
     Ok(PromptPair{
-        positive_prompt:finalize_positive_prompt(&req.prompt_pair.positive_prompt,&req.loras),
+        positive_prompt:finalize_positive_prompt(&req.prompt_pair.positive_prompt),
         negative_prompt:req.prompt_pair.negative_prompt.trim().to_string(),
         rationale:req.prompt_pair.rationale.clone(),
     })
@@ -1974,7 +1947,7 @@ mod tests {
         assert_eq!(prepared.loras.len(), 2);
 
         let raw_pair = PromptPair {
-            positive_prompt:"Alice in a classroom, smiling, school uniform, alice_trigger".into(),
+            positive_prompt:"Alice in a classroom with alice_trigger, smiling in school_uniform_trigger".into(),
             negative_prompt:"blurry, malformed hands".into(),
             rationale:None,
         };
@@ -1982,7 +1955,8 @@ mod tests {
             prompt_pair:raw_pair,
             loras:prepared.loras.clone(),
         }).expect("finalize prompt dry run must succeed");
-        assert!(finalized.positive_prompt.ends_with("alice_trigger, school_uniform_trigger"));
+        assert!(finalized.positive_prompt.contains("alice_trigger"));
+        assert!(finalized.positive_prompt.contains("school_uniform_trigger"));
 
         let workflow = build_workflow(WorkflowRequest {
             checkpoint:prepared.checkpoint,
@@ -2008,9 +1982,9 @@ mod tests {
     }
 
     #[test]
-    fn activation_prompts_are_deterministically_appended() {
+    fn activation_prompts_are_preserved_in_llm_chosen_positions() {
         let pair = PromptPair {
-            positive_prompt: "portrait, blue eyes, serene expression, triggerA".into(),
+            positive_prompt: "portrait, triggerA, blue eyes, style_tag, serene expression".into(),
             negative_prompt: "blurry".into(),
             rationale: None,
         };
@@ -2035,8 +2009,9 @@ mod tests {
 
         assert_eq!(
             finalized.positive_prompt,
-            "portrait, blue eyes, serene expression, triggerA, char_tag, style_tag"
+            "portrait, triggerA, blue eyes, style_tag, serene expression"
         );
+        assert!(!finalized.positive_prompt.contains("char_tag"));
         assert_eq!(finalized.negative_prompt, "blurry");
     }
 }
