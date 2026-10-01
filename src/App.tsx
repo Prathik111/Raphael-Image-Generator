@@ -281,7 +281,6 @@ function App(){
   const [busy,setBusy]=useState(false);
   const [error,setError]=useState('');
   const [toast,setToast]=useState('');
-  const [thumbs,setThumbs]=useState<Record<string,string>>({});
   const [selectedLoraIds,setSelectedLoraIds]=useState<string[]>([]);
   const [manualLoraIds,setManualLoraIds]=useState<string[]>([]);
 
@@ -365,15 +364,6 @@ function App(){
     }
   },[]);
 
-  useEffect(()=>{
-    if(!library) return;
-    for(const model of [...library.checkpoints,...library.loras]){
-      if(!model.thumbnail || thumbs[model.id]) continue;
-      void apiInvoke<string>('path_to_data_url',{path:model.thumbnail})
-        .then(url=>setThumbs(x=>({...x,[model.id]:url})))
-        .catch(()=>undefined);
-    }
-  },[library]);
 
   const setStageStatus=(key:Stage,value:Status)=>{
     setStatus(x=>({...x,[key]:value}));
