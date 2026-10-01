@@ -977,7 +977,7 @@ function App(){
         </div>)}
       </section>
 
-      {tab==='generate' && <>
+      {tab==='generate' && <div className="generate-layout">
         <section className="workspace-panel">
           <div className="panel-head">
             <div>
@@ -1042,7 +1042,7 @@ function App(){
           </div> :
           <div className="result-placeholder"><WandSparkles size={22}/><span>{comfyStatus==='error' ? 'GENERATION FAILED' : 'NO IMAGE YET'}</span></div>}
         </section>
-      </>}
+        </div>}
 
       {tab==='history' && <section className="history-panel history-detail-panel">
         {!selectedHistory ? (
@@ -1140,7 +1140,7 @@ function App(){
         <div className="right-section-head"><span>CHECKPOINTS</span><span>{filteredCheckpoints.length}</span></div>
         <div className="search-row compact"><Search size={13}/><input value={checkpointSearch} onChange={e=>setCheckpointSearch(e.target.value)} placeholder="Search checkpoints"/></div>
         <div className="checkpoint-list">
-          {filteredCheckpoints.map(model=><button key={model.id} className={'checkpoint-row ' + (selected?.id===model.id ? 'selected' : '')} onClick={()=>selectCheckpoint(model.id)}>
+          {filteredCheckpoints.map(model=><button key={model.id} title={[model.name,model.baseModel || '',...model.tags].filter(Boolean).join(' · ')} className={'checkpoint-row ' + (selected?.id===model.id ? 'selected' : '')} onClick={()=>selectCheckpoint(model.id)}>
             <div className="checkpoint-row-thumb"><ModelThumbnail model={model} iconSize={16}/></div>
             <div className="checkpoint-row-copy"><b>{model.name}</b><span>{model.baseModel || 'BASE UNKNOWN'}</span><small>{model.tags.slice(0,3).join(' · ')}</small></div>
             {selected?.id===model.id && <Check size={14}/>}
@@ -1152,7 +1152,7 @@ function App(){
         <div className="right-section-head"><span>LORAS</span><span>{selectedLoraIds.length} / {allLoras.length}</span></div>
         <div className="search-row compact"><Search size={13}/><input value={loraSearch} onChange={e=>setLoraSearch(e.target.value)} placeholder="Search LoRAs"/></div>
         <div className="lora-list">
-          {filteredLoras.map(lora=><button key={lora.id} className={'lora-row ' + (selectedLoraIds.includes(lora.id) ? 'selected' : '')} onClick={()=>toggleLora(lora.id)}>
+          {filteredLoras.map(lora=><button key={lora.id} title={[lora.name,lora.baseModel || '',...lora.tags].filter(Boolean).join(' · ')} className={'lora-row ' + (selectedLoraIds.includes(lora.id) ? 'selected' : '')} onClick={()=>toggleLora(lora.id)}>
             <div className="lora-row-thumb"><ModelThumbnail model={lora} iconSize={15}/></div>
             <div className="lora-row-copy"><b>{lora.name}</b><span>{lora.character ? 'CHARACTER' : 'SUPPORT'}</span><small>{lora.tags.slice(0,3).join(' · ')}</small></div>
             {selectedLoraIds.includes(lora.id) && <Check size={14}/>}
@@ -1160,13 +1160,13 @@ function App(){
         </div>
       </div>
 
-      <div className="right-section backend-section">
-        <div className="right-section-head"><span>BACKEND</span></div>
+      <details className="right-section backend-section">
+        <summary><span>BACKEND</span><span>CONFIGURE</span></summary>
         <label className="compact-field"><span>COMFYUI API</span><input value={comfyUrl} onChange={e=>setComfyUrl(e.target.value)}/></label>
         <label className="compact-field"><span>MODELS ROOT</span><input value={comfyRoot} onChange={e=>setComfyRoot(e.target.value)}/></label>
         <label className="compact-field"><span>REGISTRY URL</span><input value={registryUrl} onChange={e=>setRegistryUrl(e.target.value)}/></label>
         <button className="secondary-btn full" onClick={()=>void scan()}><RefreshCw size={13}/> SCAN LIBRARY</button>
-      </div>
+      </details>
     </aside>
 
           {settingsOpen && <div className="settings-overlay" onMouseDown={()=>setSettingsOpen(false)}>
