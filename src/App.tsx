@@ -98,6 +98,87 @@ async function apiInvoke<T>(command:string, args:Record<string, unknown> = {}):P
   return value as T;
 }
 
+type ThumbnailState = 'loading' | 'ready' | 'error';
+
+const thumbnailCache = new Map<string,string>();
+const thumbnailPending = new Map<string,Promise<string>>();
+
+function fetchModelThumbnail(reference:string):Promise<string>{
+  const cached = thumbnailCache.get(reference);
+  if(cached) return Promise.resolve(cached);
+  const pending = thumbnailPending.get(reference);
+  if(pending) return pending;
+  const request = apiInvoke<string>('path_to_data_url',{path:reference})
+    .then(url=>{
+      thumbnailCache.set(reference,url);
+      return url;
+    })
+    .finally(()=>thumbnailPending.delete(reference));
+  thumbnailPending.set(reference,request);
+  return request;
+}
+
+function ModelThumbnail({model,iconSize=18}:{model:LibrarySnapshot['checkpoints'][number];iconSize?:number}){
+  const frameRef = useRef<HTMLSpanElement|null>(null);
+  const [state,setState] = useState<ThumbnailState>(
+    model.thumbnail && thumbnailCache.has(model.thumbnail) ? 'ready' : 'loading',
+  );
+  const [src,setSrc] = useState<string|null>(
+    model.thumbnail ? thumbnailCache.get(model.thumbnail) || null : null,
+  );
+
+  useEffect(()=>{
+    const reference=model.thumbnail;
+    if(!reference){
+      setState('error');
+      setSrc(null);
+      return;
+    }
+    const cached=thumbnailCache.get(reference);
+    if(cached){
+      setSrc(cached);
+      setState('ready');
+      return;
+    }
+    let active=true;
+    let observer:IntersectionObserver|undefined;
+    const load=()=>{
+      void fetchModelThumbnail(reference)
+        .then(url=>{
+          if(!active) return;
+          setSrc(url);
+          setState('ready');
+        })
+        .catch(()=>{
+          if(!active) return;
+          setSrc(null);
+          setState('error');
+        });
+    };
+    if(typeof IntersectionObserver==='undefined' || !frameRef.current){
+      load();
+    }else{
+      observer=new IntersectionObserver(entries=>{
+        if(!entries[0]?.isIntersecting) return;
+        observer?.disconnect();
+        load();
+      },{rootMargin:'160px'});
+      observer.observe(frameRef.current);
+    }
+    return ()=>{
+      active=false;
+      observer?.disconnect();
+    };
+  },[model.thumbnail]);
+
+  return <span ref={frameRef} className={'model-thumbnail ' + state}
+    aria-label={state==='error' ? 'Thumbnail unavailable' : state==='ready' ? model.name : 'Loading thumbnail'}
+    title={state==='error' ? 'Thumbnail unavailable' : model.name}>
+    {src && state==='ready'
+      ? <img src={src} alt="" loading="lazy" decoding="async"/>
+      : <Layers3 size={iconSize} aria-hidden="true"/>}
+  </span>;
+}
 async function consumeSse(
   url:string,
   body:Record<string, unknown>,
