@@ -1132,7 +1132,7 @@ function App(){
     <aside className="right-rail">
       <div className="rail-label">MODELS</div>
       {selected && <div className="selected-model-card">
-        <div className="selected-model-thumb">{thumbs[selected.id] ? <img src={thumbs[selected.id]} alt=""/> : <Layers3 size={22}/>}</div>
+        <div className="selected-model-thumb"><ModelThumbnail model={selected} iconSize={22}/></div>
         <div className="selected-model-copy"><b>{selected.name}</b><span>{selected.baseModel || 'BASE UNKNOWN'}</span></div>
       </div>}
 
@@ -1141,7 +1141,7 @@ function App(){
         <div className="search-row compact"><Search size={13}/><input value={checkpointSearch} onChange={e=>setCheckpointSearch(e.target.value)} placeholder="Search checkpoints"/></div>
         <div className="checkpoint-list">
           {filteredCheckpoints.map(model=><button key={model.id} className={'checkpoint-row ' + (selected?.id===model.id ? 'selected' : '')} onClick={()=>selectCheckpoint(model.id)}>
-            <div className="checkpoint-row-thumb">{thumbs[model.id] ? <img src={thumbs[model.id]} alt=""/> : <Layers3 size={16}/>}</div>
+            <div className="checkpoint-row-thumb"><ModelThumbnail model={model} iconSize={16}/></div>
             <div className="checkpoint-row-copy"><b>{model.name}</b><span>{model.baseModel || 'BASE UNKNOWN'}</span><small>{model.tags.slice(0,3).join(' · ')}</small></div>
             {selected?.id===model.id && <Check size={14}/>}
           </button>)}
@@ -1153,7 +1153,7 @@ function App(){
         <div className="search-row compact"><Search size={13}/><input value={loraSearch} onChange={e=>setLoraSearch(e.target.value)} placeholder="Search LoRAs"/></div>
         <div className="lora-list">
           {filteredLoras.map(lora=><button key={lora.id} className={'lora-row ' + (selectedLoraIds.includes(lora.id) ? 'selected' : '')} onClick={()=>toggleLora(lora.id)}>
-            <div className="lora-row-thumb">{thumbs[lora.id] ? <img src={thumbs[lora.id]} alt=""/> : <Layers3 size={15}/>}</div>
+            <div className="lora-row-thumb"><ModelThumbnail model={lora} iconSize={15}/></div>
             <div className="lora-row-copy"><b>{lora.name}</b><span>{lora.character ? 'CHARACTER' : 'SUPPORT'}</span><small>{lora.tags.slice(0,3).join(' · ')}</small></div>
             {selectedLoraIds.includes(lora.id) && <Check size={14}/>}
           </button>)}
