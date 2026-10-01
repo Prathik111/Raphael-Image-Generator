@@ -1094,9 +1094,7 @@ function App(){
           <section className="history-settings-card">
             <div className="history-section-title">MODELS</div>
             <div className="history-model-header">
-              {selectedHistory.checkpoint.thumbnail && thumbs[selectedHistory.checkpoint.id]
-                ? <img src={thumbs[selectedHistory.checkpoint.id]} alt=""/>
-                : <div className="history-model-placeholder"><Layers3 size={20}/></div>}
+              <ModelThumbnail model={selectedHistory.checkpoint} iconSize={20}/>
               <div><b>{selectedHistory.checkpoint.name}</b><span>{selectedHistory.checkpoint.baseModel || 'BASE UNKNOWN'}</span></div>
             </div>
             <div className="history-lora-detail">
