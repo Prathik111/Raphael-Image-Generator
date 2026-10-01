@@ -112,7 +112,7 @@ button,input,textarea,select{font-size:12px}
 .rail-btn{padding:11px 12px;font-size:11px;letter-spacing:.11em}
 .rail-btn svg{width:16px;height:16px}
 .recent-heading{margin:13px 3px 5px;font-size:10px;color:var(--dim);letter-spacing:.16em}
-.recent-images{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;min-height:90px;max-height:220px;overflow:auto;padding-right:2px}
+.recent-images{display:grid;grid-template-columns:repeat(2,1fr);gap:6px;min-height:90px;max-height:220px;overflow:auto;padding-right:2px}
 .recent-image{position:relative;aspect-ratio:1/1;border:1px solid var(--line2);padding:0;background:rgba(0,0,0,.44);overflow:hidden}
 .recent-image:hover{border-color:rgba(255,255,255,.65);transform:translateY(-1px)}
 .recent-image img{width:100%;height:100%;display:block;object-fit:cover}
