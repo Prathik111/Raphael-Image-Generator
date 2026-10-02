@@ -549,12 +549,19 @@ async fn hydrate_registry_model(
     // the dedicated thumbnail/cover records, then fall back to preview/gallery
     // for older Registry projections that did not classify the cached image as
     // a thumbnail yet.
-    let thumbnail = assets.iter()
-        .find(|asset| asset.kind.eq_ignore_ascii_case("thumbnail"))
-        .or_else(|| assets.iter().find(|asset| asset.kind.eq_ignore_ascii_case("cover")))
-        .or_else(|| assets.iter().find(|asset| asset.kind.eq_ignore_ascii_case("preview")))
-        .or_else(|| assets.iter().find(|asset| asset.kind.eq_ignore_ascii_case("gallery")))
-        .map(|asset| format!("registry://{}/{}", model.id, asset.id));
+    // Keep every usable Registry image asset as a fallback candidate.
+    // Older model records can have a stale thumbnail row while a preview or
+    // gallery asset is still valid.
+    let mut thumbnail_candidates = Vec::new();
+    for kind in ["thumbnail", "cover", "preview", "gallery"] {
+        thumbnail_candidates.extend(
+            assets.iter()
+                .filter(|asset| asset.kind.eq_ignore_ascii_case(kind))
+                .map(|asset| format!("registry://{}/{}", model.id, asset.id)),
+        );
+    }
+    let thumbnail = (!thumbnail_candidates.is_empty())
+        .then(|| thumbnail_candidates.join("|"));
 
     Ok(Some(ModelInfo {
         id: model.id,
@@ -578,22 +585,35 @@ async fn scan_registry_library(req: &ScanRequest) -> Result<LibrarySnapshot, Str
 
     let (base_url, token) = ensure_registry(req.registry_url.as_deref()).await?;
 
-    // The canonical Registry catalog is /api/v1/models. The dedicated
-    // /checkpoints and /loras routes are convenience filters; consuming the
-    // canonical catalog avoids depending on those convenience routes and
-    // keeps the Image Generator compatible with older/newer Registry builds.
-    let all_models = registry_models(&base_url, &token, "/api/v1/models").await?;
+    // Prefer the Registry's typed, server-side paginated endpoints. They
+    // cannot lose checkpoint records simply because unrelated model types
+    // make the canonical catalog larger. Fall back to the canonical catalog
+    // when talking to an older Registry build that lacks the typed routes.
+    let (checkpoint_result, lora_result) = tokio::join!(
+        registry_models(&base_url, &token, "/api/v1/checkpoints"),
+        registry_models(&base_url, &token, "/api/v1/loras"),
+    );
 
-    let checkpoint_models: Vec<RegistryModel> = all_models
-        .iter()
-        .filter(|model| model.model_type.eq_ignore_ascii_case("checkpoint"))
-        .cloned()
-        .collect();
-    let lora_models: Vec<RegistryModel> = all_models
-        .iter()
-        .filter(|model| model.model_type.eq_ignore_ascii_case("lora"))
-        .cloned()
-        .collect();
+    let mut used_canonical_fallback = false;
+    let (checkpoint_models, lora_models): (Vec<RegistryModel>, Vec<RegistryModel>) =
+        match (checkpoint_result, lora_result) {
+            (Ok(checkpoints), Ok(loras)) => (checkpoints, loras),
+            _ => {
+                used_canonical_fallback = true;
+                let all_models = registry_models(&base_url, &token, "/api/v1/models").await?;
+                let checkpoints = all_models
+                    .iter()
+                    .filter(|model| model.model_type.eq_ignore_ascii_case("checkpoint"))
+                    .cloned()
+                    .collect();
+                let loras = all_models
+                    .iter()
+                    .filter(|model| model.model_type.eq_ignore_ascii_case("lora"))
+                    .cloned()
+                    .collect();
+                (checkpoints, loras)
+            }
+        };
 
     let mut checkpoints = Vec::new();
     let mut loras = Vec::new();
@@ -645,27 +665,16 @@ async fn scan_registry_library(req: &ScanRequest) -> Result<LibrarySnapshot, Str
     loras.sort_by_key(|model| model.name.to_lowercase());
 
     let mut warnings = Vec::new();
-    if all_models.is_empty() {
-        warnings.push(
-            "The Raphael Model Registry catalog is empty. The Image Generator is connected to the Registry, but no models are registered.".into()
-        );
-    } else if checkpoint_models.is_empty() {
-        warnings.push(format!(
-            "The Raphael Model Registry returned {} model records, but none are typed as checkpoints.",
-            all_models.len()
-        ));
+    if checkpoint_models.is_empty() {
+        warnings.push("The Raphael Model Registry returned no checkpoint records.".into());
     }
     if lora_models.is_empty() {
-        if all_models.is_empty() {
-            warnings.push(
-                "No LoRAs are available because the Raphael Model Registry catalog contains no model records.".into()
-            );
-        } else {
-            warnings.push(format!(
-                "The Raphael Model Registry returned {} model records, but none are typed as LoRA.",
-                all_models.len()
-            ));
-        }
+        warnings.push("The Raphael Model Registry returned no LoRA records.".into());
+    }
+    if used_canonical_fallback {
+        warnings.push(
+            "The Registry checkpoint/LoRA routes were unavailable; the canonical model catalog fallback was used.".into()
+        );
     }
     if hydration_failures > 0 {
         warnings.push(format!(
