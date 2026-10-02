@@ -214,11 +214,26 @@ function ModelThumbnail({model,iconSize=18}:{model:LibrarySnapshot['checkpoints'
     };
   },[referenceKey]);
 
+  const handleImageError=()=>{
+    const failedReference=references.find(reference=>thumbnailCache.get(reference)===src);
+    if(failedReference) thumbnailCache.delete(failedReference);
+    setState('loading');
+    void fetchModelThumbnail(references)
+      .then(url=>{
+        setSrc(url);
+        setState('ready');
+      })
+      .catch(()=>{
+        setSrc(null);
+        setState('error');
+      });
+  };
+
   return <span ref={frameRef} className={'model-thumbnail ' + state}
     aria-label={state==='error' ? 'Thumbnail unavailable' : state==='ready' ? model.name : 'Loading thumbnail'}
     title={state==='error' ? 'Thumbnail unavailable' : model.name}>
     {src && state==='ready'
-      ? <img src={src} alt="" loading="lazy" decoding="async"/>
+      ? <img src={src} alt="" loading="lazy" decoding="async" onError={handleImageError}/>
       : <Layers3 size={iconSize} aria-hidden="true"/>}
   </span>;
 }
