@@ -1413,7 +1413,7 @@ function App(){
                 onChange={e=>setGenerationDraft(d=>({...d,userPromptTemplate:e.target.value}))}
               />
             </label>
-            <div className="field-help">Placeholders: {{CHECKPOINT}}, {{BASE}}, {{COMPATIBILITY}}, {{LORA_METADATA}}, {{CHARACTER}}, {{SETTING}}, {{POSE}}, {{EXPRESSION}}, {{DRESS}}, {{COMPOSITION}}, {{EXTRA}}</div>
+            <div className="field-help">{'Placeholders: {{CHECKPOINT}}, {{BASE}}, {{COMPATIBILITY}}, {{LORA_METADATA}}, {{CHARACTER}}, {{SETTING}}, {{POSE}}, {{EXPRESSION}}, {{DRESS}}, {{COMPOSITION}}, {{EXTRA}}'}</div>
             <label className="wide-field">
               <span>EXPANSION USER PROMPT · EDITABLE</span>
               <textarea
@@ -1422,7 +1422,7 @@ function App(){
                 onChange={e=>setGenerationDraft(d=>({...d,expansionPromptTemplate:e.target.value}))}
               />
             </label>
-            <div className="field-help">The expansion pass is only sent when the first result needs expansion. Additional placeholder: {{PREVIOUS_JSON}}</div>
+            <div className="field-help">{'The expansion pass is only sent when the first result needs expansion. Additional placeholder: {{PREVIOUS_JSON}}'}</div>
           </section>
 
           <section className="settings-section">
