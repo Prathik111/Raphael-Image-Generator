@@ -1264,9 +1264,9 @@ function App(){
             <div className="history-section-title">SYSTEM PROMPT · DEMOGRAPHIC · SENT EXACTLY TO LLM</div>
             <pre className="history-code">{selectedHistory.generationSettings.systemPrompt}</pre>
             <div className="history-section-title">PRIMARY USER PROMPT TEMPLATE</div>
-            <pre className="history-code">{selectedHistory.generationSettings.userPromptTemplate}</pre>
+            <pre className="history-code">{selectedHistory.generationSettings.userPromptTemplate || defaultUserPromptTemplate}</pre>
             <div className="history-section-title">EXPANSION USER PROMPT TEMPLATE</div>
-            <pre className="history-code">{selectedHistory.generationSettings.expansionPromptTemplate}</pre>
+            <pre className="history-code">{selectedHistory.generationSettings.expansionPromptTemplate || defaultExpansionPromptTemplate}</pre>
           </section>}
 
           <section className="history-settings-card">
