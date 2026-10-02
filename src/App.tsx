@@ -33,6 +33,85 @@ const defaultDemographicPrompts: DemographicPrompts = {
 
 const demographicPromptsStorageKey = 'raphael-image-generator.demographic-prompts.v1';
 
+const defaultUserPromptTemplate = `CHECKPOINT: {{CHECKPOINT}}
+BASE: {{BASE}}
+COMPATIBILITY: {{COMPATIBILITY}}
+
+SELECTED LoRAs AND THEIR DOCUMENTED PURPOSE METADATA:
+{{LORA_METADATA}}
+
+SCENE:
+CHARACTER: {{CHARACTER}}
+SETTING: {{SETTING}}
+POSE: {{POSE}}
+EXPRESSION: {{EXPRESSION}}
+DRESS: {{DRESS}}
+COMPOSITION: {{COMPOSITION}}
+EXTRA: {{EXTRA}}
+
+Write the FINAL positive and negative prompts that will be sent directly to the image model. The positive prompt must be one long, coherent, comma-separated tag string of 90-160 words with at least 18 meaningful visual tags or short phrases. Use the selected LoRA metadata as actual prompt-building input, not as reference-only information. For every documented activation prompt, include the exact activation phrase in the positive prompt at least once, unchanged, and place it naturally next to the visual concept it activates instead of collecting activation prompts at the end. The LoRA description explains what visual concept the activation prompt controls; use that description to decide where and how that activation phrase belongs. Do not invent or paraphrase activation prompts, and do not omit them. Do not expose LoRA implementation syntax such as <lora:...> or weighted [LoRA - ...] notation. Do not mention checkpoint/model names, filenames or base-model labels. Explicitly cover subject state/action, pose, hands/arms, head direction, gaze, facial expression, emotional state, clothing/accessories, interaction, setting, background/environment, atmosphere, camera viewpoint, framing, perspective, depth, lighting, color/mood, materials and finishing details using short literal tags or compact phrases only. Never turn these into sentences or metaphors. The negative prompt should be a useful 20-35 item comma-separated list of short concrete failure tags targeted to the actual image and selected LoRAs. Return JSON only.`;
+
+const defaultExpansionPromptTemplate = `EXPANSION PASS. Rewrite the previous result as the final production prompt pair in deterministic tag format. Preserve every required scene constraint and every documented LoRA activation prompt. Each activation prompt must appear exactly as documented, at least once, beside the visual concept described by its LoRA, not as an appended block at the end. Use the LoRA descriptions to understand the intended visual effect. Do not remove or paraphrase activation prompts. Remove checkpoint names, model filenames, LoRA names and implementation syntax such as <lora:...> or weighted [LoRA - ...] notation. Rewrite the positive prompt as ONE long, coherent comma-separated tag string of 90-160 words with at least 18 meaningful visual tags or short phrases. No sentences, metaphors, storytelling, poetic language or sentence punctuation. Use literal canonical tags, mostly 1-5 words each. Explicitly include subject identity, visible appearance, current state, action/activity, body pose, hands/arms, head direction, gaze, facial expression, emotional state, clothing/accessories, interaction with surroundings, setting, background/environment, atmosphere, camera viewpoint, shot type, framing, perspective, depth, lighting direction/quality, color/mood, materials/textures and finishing details. Do not rely on any LoRA to provide expression, pose, state, background or composition. Also provide a targeted 20-35 item negative tag list. Return JSON only.
+
+CHECKPOINT: {{CHECKPOINT}}
+BASE: {{BASE}}
+COMPATIBILITY: {{COMPATIBILITY}}
+SCENE:
+CHARACTER: {{CHARACTER}}
+SETTING: {{SETTING}}
+POSE: {{POSE}}
+EXPRESSION: {{EXPRESSION}}
+DRESS: {{DRESS}}
+COMPOSITION: {{COMPOSITION}}
+EXTRA: {{EXTRA}}
+
+SELECTED LoRA METADATA:
+{{LORA_METADATA}}
+
+PREVIOUS JSON:
+{{PREVIOUS_JSON}}`;
+
+const generationSettingsStorageKey = 'raphael-image-generator.generation-settings.v2';
+
+interface StoredGenerationSettings {
+  llm?: LlmSettings;
+  demographic?: DemographicLevel;
+  demographicPrompts?: DemographicPrompts;
+  maxLoras?: number;
+  randomLoraMin?: number;
+  randomLoraMax?: number;
+  constraints?: Constraints;
+  width?: number;
+  height?: number;
+  steps?: number;
+  cfg?: number;
+  sampler?: string;
+  userPromptTemplate?: string;
+  expansionPromptTemplate?: string;
+}
+
+function loadPersistedGenerationSettings(): StoredGenerationSettings {
+  if(typeof window==='undefined') return {};
+  try{
+    const raw=window.localStorage.getItem(generationSettingsStorageKey);
+    if(!raw) return {};
+    const parsed=JSON.parse(raw) as StoredGenerationSettings;
+    return parsed && typeof parsed==='object' ? parsed : {};
+  }catch{
+    return {};
+  }
+}
+
+function renderPromptTemplate(
+  template:string,
+  values:Record<string,string>,
+){
+  return template.replace(/\{\{([A-Z0-9_]+)\}\}/g,(match,key)=>
+    Object.prototype.hasOwnProperty.call(values,key) ? values[key] : match
+  );
+}
+
+
 function loadPersistedDemographicPrompts(): DemographicPrompts {
   if(typeof window === 'undefined') return defaultDemographicPrompts;
   try {
@@ -369,8 +448,8 @@ function promptNeedsExpansion(pair:PromptPair){
 }
 
 function App(){
-  const [provider,setProvider]=useState<ProviderKind>('ollama');
-  const [llm,setLlm]=useState<LlmSettings>({
+  const persistedGenerationSettings=loadPersistedGenerationSettings();
+  const initialLlm: LlmSettings={
     provider:'ollama',
     baseUrl:'http://127.0.0.1:11434',
     apiKey:'',
@@ -378,7 +457,10 @@ function App(){
     temperature:0.72,
     maxTokens:8192,
     contextTokens:32768,
-  });
+    ...(persistedGenerationSettings.llm || {}),
+  };
+  const [provider,setProvider]=useState<ProviderKind>(initialLlm.provider);
+  const [llm,setLlm]=useState<LlmSettings>(initialLlm);
   const [models,setModels]=useState<string[]>([]);
   const [library,setLibrary]=useState<LibrarySnapshot|null>(null);
   const [selectedId,setSelectedId]=useState('');
@@ -386,15 +468,15 @@ function App(){
   const [registryUrl,setRegistryUrl]=useState('');
   const [comfyUrl,setComfyUrl]=useState('http://127.0.0.1:8188');
 
-  const [constraints,setConstraints]=useState<Constraints>(emptyConstraints);
-  const [demographic,setDemographic]=useState<DemographicLevel>('safe');
-  const [demographicPrompts,setDemographicPrompts]=useState<DemographicPrompts>(loadPersistedDemographicPrompts);
-  const [maxLoras,setMaxLoras]=useState(4);
-  const [width,setWidth]=useState(1024);
-  const [height,setHeight]=useState(1024);
-  const [steps,setSteps]=useState(28);
-  const [cfg,setCfg]=useState(6.5);
-  const [sampler,setSampler]=useState('euler');
+  const [constraints,setConstraints]=useState<Constraints>(persistedGenerationSettings.constraints || emptyConstraints);
+  const [demographic,setDemographic]=useState<DemographicLevel>(persistedGenerationSettings.demographic || 'safe');
+  const [demographicPrompts,setDemographicPrompts]=useState<DemographicPrompts>(persistedGenerationSettings.demographicPrompts || loadPersistedDemographicPrompts);
+  const [maxLoras,setMaxLoras]=useState(persistedGenerationSettings.maxLoras || 4);
+  const [width,setWidth]=useState(persistedGenerationSettings.width || 1024);
+  const [height,setHeight]=useState(persistedGenerationSettings.height || 1024);
+  const [steps,setSteps]=useState(persistedGenerationSettings.steps || 28);
+  const [cfg,setCfg]=useState(persistedGenerationSettings.cfg ?? 6.5);
+  const [sampler,setSampler]=useState(persistedGenerationSettings.sampler || 'euler');
 
   const [prepared,setPrepared]=useState<PreparedGeneration|null>(null);
   const [prompts,setPrompts]=useState<PromptPair|null>(null);
@@ -419,14 +501,16 @@ function App(){
     demographic,
     demographicPrompts,
     maxLoras,
-    randomLoraMin:constraints.randomLoraMin,
-    randomLoraMax:constraints.randomLoraMax,
+    randomLoraMin:constraints.randomLoraMin || persistedGenerationSettings.randomLoraMin || 2,
+    randomLoraMax:constraints.randomLoraMax || persistedGenerationSettings.randomLoraMax || 4,
     constraints,
     width,
     height,
     steps,
     cfg,
     sampler,
+    userPromptTemplate:persistedGenerationSettings.userPromptTemplate || defaultUserPromptTemplate,
+    expansionPromptTemplate:persistedGenerationSettings.expansionPromptTemplate || defaultExpansionPromptTemplate,
   });
   const [selectedHistoryId,setSelectedHistoryId]=useState('');
   const [historySettingsVisible,setHistorySettingsVisible]=useState(false);
@@ -567,7 +651,7 @@ function App(){
     setConstraints(x=>({...x,[key]:value}));
   }
 
-  function saveGenerationSettings(){
+  useEffect(()=>{
     const draft=generationDraft;
     const cappedMax=Math.max(1,Math.min(16,draft.maxLoras));
     const nextConstraints={
@@ -575,27 +659,43 @@ function App(){
       randomLoraMin:Math.max(1,Math.min(cappedMax,draft.randomLoraMin)),
       randomLoraMax:Math.max(1,Math.min(cappedMax,draft.randomLoraMax)),
     };
-    setProvider(draft.llm.provider);
-    setLlm({...draft.llm,provider:draft.llm.provider});
+    const normalizedDraft={
+      ...draft,
+      maxLoras:cappedMax,
+      randomLoraMin:nextConstraints.randomLoraMin,
+      randomLoraMax:nextConstraints.randomLoraMax,
+      constraints:nextConstraints,
+      width:Math.max(64,draft.width),
+      height:Math.max(64,draft.height),
+      steps:Math.max(1,draft.steps),
+      cfg:Math.max(0,draft.cfg),
+      sampler:draft.sampler || 'euler',
+    };
+    setProvider(normalizedDraft.llm.provider);
+    setLlm({...normalizedDraft.llm,provider:normalizedDraft.llm.provider});
     setConstraints(nextConstraints);
-    setDemographic(draft.demographic);
-    const savedDemographicPrompts={...draft.demographicPrompts};
-    setDemographicPrompts(savedDemographicPrompts);
-    try{
-      window.localStorage.setItem(demographicPromptsStorageKey,JSON.stringify(savedDemographicPrompts));
-    }catch{}
+    setDemographic(normalizedDraft.demographic);
+    setDemographicPrompts({...normalizedDraft.demographicPrompts});
     setMaxLoras(cappedMax);
-    setWidth(Math.max(64,draft.width));
-    setHeight(Math.max(64,draft.height));
-    setSteps(Math.max(1,draft.steps));
-    setCfg(Math.max(0,draft.cfg));
-    setSampler(draft.sampler || 'euler');
-    if(webHost && isTauriRuntime){
-      void apiInvoke('update_web_host_llm',{llmSettings:draft.llm}).catch(e=>setWebHostError(String(e)));
-    }
-    setSettingsOpen(false);
-    setToast('Generation settings saved');
-  }
+    setWidth(normalizedDraft.width);
+    setHeight(normalizedDraft.height);
+    setSteps(normalizedDraft.steps);
+    setCfg(normalizedDraft.cfg);
+    setSampler(normalizedDraft.sampler);
+    try{
+      window.localStorage.setItem(generationSettingsStorageKey,JSON.stringify(normalizedDraft));
+      window.localStorage.setItem(demographicPromptsStorageKey,JSON.stringify(normalizedDraft.demographicPrompts));
+    }catch{}
+  },[generationDraft]);
+
+  useEffect(()=>{
+    if(!isTauriRuntime || !webHost) return;
+    const timeout=window.setTimeout(()=>{
+      void apiInvoke('update_web_host_llm',{llmSettings:generationDraft.llm}).catch(e=>setWebHostError(String(e)));
+    },400);
+    return ()=>window.clearTimeout(timeout);
+  },[generationDraft.llm,webHost]);
+
 
   async function rollStack(){
     if(!selected || !library){
@@ -772,20 +872,23 @@ function App(){
       // Nothing else is prepended, appended, or merged into it.
       const selectedSystemPrompt = demographicPrompts[demographic];
 
-      const userPrompt=
-        'CHECKPOINT: ' + prep.checkpoint.name + '\n' +
-        'BASE: ' + (prep.checkpoint.baseModel || 'unknown') + '\n' +
-        'COMPATIBILITY: ' + prep.compatibilityKeys.join(', ') + '\n\n' +
-        'SELECTED LoRAs AND THEIR DOCUMENTED PURPOSE METADATA:\n' + loraMetadata + '\n\n' +
-        'SCENE:\n' +
-        'CHARACTER: ' + prep.scene.character + '\n' +
-        'SETTING: ' + prep.scene.setting + '\n' +
-        'POSE: ' + prep.scene.pose + '\n' +
-        'EXPRESSION: ' + prep.scene.expression + '\n' +
-        'DRESS: ' + prep.scene.dress + '\n' +
-        'COMPOSITION: ' + prep.scene.composition + '\n' +
-        'EXTRA: ' + (constraints.additional || '(none)') + '\n\n' +
-        'Write the FINAL positive and negative prompts that will be sent directly to the image model. The positive prompt must be one long, coherent, comma-separated tag string of 90-160 words with at least 18 meaningful visual tags or short phrases. Use the selected LoRA metadata as actual prompt-building input, not as reference-only information. For every documented activation prompt, include the exact activation phrase in the positive prompt at least once, unchanged, and place it naturally next to the visual concept it activates instead of collecting activation prompts at the end. The LoRA description explains what visual concept the activation prompt controls; use that description to decide where and how that activation phrase belongs. Do not invent or paraphrase activation prompts, and do not omit them. Do not expose LoRA implementation syntax such as <lora:...> or weighted [LoRA - ...] notation. Do not mention checkpoint/model names, filenames or base-model labels. Explicitly cover subject state/action, pose, hands/arms, head direction, gaze, facial expression, emotional state, clothing/accessories, interaction, setting, background/environment, atmosphere, camera viewpoint, framing, perspective, depth, lighting, color/mood, materials and finishing details using short literal tags or compact phrases only. Never turn these into sentences or metaphors. The negative prompt should be a useful 20-35 item comma-separated list of short concrete failure tags targeted to the actual image and selected LoRAs. Return JSON only.';
+      const promptTemplateValues={
+        CHECKPOINT:prep.checkpoint.name,
+        BASE:prep.checkpoint.baseModel || 'unknown',
+        COMPATIBILITY:prep.compatibilityKeys.join(', '),
+        LORA_METADATA:loraMetadata,
+        CHARACTER:prep.scene.character,
+        SETTING:prep.scene.setting,
+        POSE:prep.scene.pose,
+        EXPRESSION:prep.scene.expression,
+        DRESS:prep.scene.dress,
+        COMPOSITION:prep.scene.composition,
+        EXTRA:constraints.additional || '(none)',
+      };
+      const userPrompt=renderPromptTemplate(
+        generationDraft.userPromptTemplate,
+        promptTemplateValues,
+      );
 
       await streamLlm({
         settings:llm,
@@ -801,15 +904,17 @@ function App(){
       if(promptNeedsExpansion(rawPair)){
         streamText.current='';
         flushSync(()=>setStream(''));
-        const expansionPrompt=
-          'EXPANSION PASS. Rewrite the previous result as the final production prompt pair in deterministic tag format. Preserve every required scene constraint and every documented LoRA activation prompt. Each activation prompt must appear exactly as documented, at least once, beside the visual concept described by its LoRA, not as an appended block at the end. Use the LoRA descriptions to understand the intended visual effect. Do not remove or paraphrase activation prompts. Remove checkpoint names, model filenames, LoRA names and implementation syntax such as <lora:...> or weighted [LoRA - ...] notation. Rewrite the positive prompt as ONE long, coherent comma-separated tag string of 90-160 words with at least 18 meaningful visual tags or short phrases. No sentences, metaphors, storytelling, poetic language or sentence punctuation. Use literal canonical tags, mostly 1-5 words each. Explicitly include subject identity, visible appearance, current state, action/activity, body pose, hands/arms, head direction, gaze, facial expression, emotional state, clothing/accessories, interaction with surroundings, setting, background/environment, atmosphere, camera viewpoint, shot type, framing, perspective, depth, lighting direction/quality, color/mood, materials/textures and finishing details. Do not rely on any LoRA to provide expression, pose, state, background or composition. Also provide a targeted 20-35 item negative tag list. Return JSON only.';
+        const expansionUserPrompt=renderPromptTemplate(
+          generationDraft.expansionPromptTemplate,
+          {
+            ...promptTemplateValues,
+            PREVIOUS_JSON:JSON.stringify(rawPair),
+          },
+        );
         await streamLlm({
           settings:llm,
           systemPrompt:selectedSystemPrompt,
-          userPrompt:
-            expansionPrompt +
-            '\n\nSELECTED LoRA METADATA:\n' + loraMetadata +
-            '\n\nPREVIOUS JSON:\n' + JSON.stringify(rawPair),
+          userPrompt:expansionUserPrompt,
         },event=>{
           streamText.current+=event;
           flushSync(()=>setStream(streamText.current));
@@ -889,6 +994,8 @@ function App(){
         systemPrompt:demographicPrompts[demographic],
         demographic,
         demographicPrompts:{...demographicPrompts},
+        userPromptTemplate:generationDraft.userPromptTemplate,
+        expansionPromptTemplate:generationDraft.expansionPromptTemplate,
         maxLoras,
         randomLoraMin:constraints.randomLoraMin,
         randomLoraMax:constraints.randomLoraMax,
@@ -1156,6 +1263,10 @@ function App(){
 
             <div className="history-section-title">SYSTEM PROMPT · DEMOGRAPHIC · SENT EXACTLY TO LLM</div>
             <pre className="history-code">{selectedHistory.generationSettings.systemPrompt}</pre>
+            <div className="history-section-title">PRIMARY USER PROMPT TEMPLATE</div>
+            <pre className="history-code">{selectedHistory.generationSettings.userPromptTemplate || defaultUserPromptTemplate}</pre>
+            <div className="history-section-title">EXPANSION USER PROMPT TEMPLATE</div>
+            <pre className="history-code">{selectedHistory.generationSettings.expansionPromptTemplate || defaultExpansionPromptTemplate}</pre>
           </section>}
 
           <section className="history-settings-card">
@@ -1293,6 +1404,28 @@ function App(){
           </section>
 
           <section className="settings-section">
+            <div className="settings-section-title">LLM USER PROMPTS</div>
+            <label className="wide-field">
+              <span>PRIMARY USER PROMPT · EDITABLE</span>
+              <textarea
+                className="settings-textarea prompt-template-editor"
+                value={generationDraft.userPromptTemplate}
+                onChange={e=>setGenerationDraft(d=>({...d,userPromptTemplate:e.target.value}))}
+              />
+            </label>
+            <div className="field-help">Placeholders: {{CHECKPOINT}}, {{BASE}}, {{COMPATIBILITY}}, {{LORA_METADATA}}, {{CHARACTER}}, {{SETTING}}, {{POSE}}, {{EXPRESSION}}, {{DRESS}}, {{COMPOSITION}}, {{EXTRA}}</div>
+            <label className="wide-field">
+              <span>EXPANSION USER PROMPT · EDITABLE</span>
+              <textarea
+                className="settings-textarea prompt-template-editor"
+                value={generationDraft.expansionPromptTemplate}
+                onChange={e=>setGenerationDraft(d=>({...d,expansionPromptTemplate:e.target.value}))}
+              />
+            </label>
+            <div className="field-help">The expansion pass is only sent when the first result needs expansion. Additional placeholder: {{PREVIOUS_JSON}}</div>
+          </section>
+
+          <section className="settings-section">
             <div className="settings-section-title">SCENE</div>
             <div className="field-grid">
               {(['setting','pose','expression','character','dress','composition','additional'] as const).map(key=>
@@ -1328,8 +1461,8 @@ function App(){
         </div>
 
         <div className="drawer-foot">
-          <button className="secondary-btn" onClick={()=>setSettingsOpen(false)}>CANCEL</button>
-          <button className="primary-btn" onClick={saveGenerationSettings}>SAVE SETTINGS</button>
+          <span>SETTINGS AUTO-SAVED</span>
+          <button className="primary-btn" onClick={()=>setSettingsOpen(false)}>DONE</button>
         </div>
         </div>
       </div>}

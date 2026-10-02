@@ -112,6 +112,8 @@ export interface GenerationSettings {
   systemPrompt: string;
   demographic: DemographicLevel;
   demographicPrompts: DemographicPrompts;
+  userPromptTemplate: string;
+  expansionPromptTemplate: string;
   maxLoras: number;
   randomLoraMin: number;
   randomLoraMax: number;
