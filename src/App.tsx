@@ -23,17 +23,6 @@ const emptyConstraints: Constraints = {
   randomLoraMin:2, randomLoraMax:4,
 };
 
-const promptFormatSystemPrompt =
-  'Use a deterministic tag-based image-prompt format. Write literal Stable-Diffusion-style tags and short descriptive phrases, not prose. Separate every visual concept with commas; do not write sentences, narrative clauses, explanations, metaphors, similes, poetic language, storytelling, or figurative comparisons. Prefer canonical, literal terms over creative synonyms. Most tags should be 1-5 words; longer phrases are allowed only when they are a single concrete visual concept. Do not use sentence punctuation such as periods, semicolons, colons or quotation marks inside positive or negative prompts. Do not begin tags with filler such as "a", "an", "the", "this", "with", or "wearing". Avoid connective prose such as "is", "has", "while", "because", "as", "looking like", or "surrounded by". Encode relationships as compact tags, for example "standing, hand on hip, looking at viewer" rather than a sentence. Keep the order deterministic: subject identity, visible appearance, body/anatomy, action/state, pose, hands/arms, head/gaze, expression, clothing, accessories, interaction, setting, background, composition, camera/viewpoint, lighting, color, materials/textures, artistic/rendering details, then finishing quality tags. Keep each concept explicit and concrete rather than implied. For LoRA activation prompts, preserve every documented activation phrase exactly and place it as a tag or short phrase next to the visual concept it activates. Never paraphrase activation phrases. The negative prompt must use the same deterministic comma-separated tag style with short concrete failure tags only.'; 
-
-const defaultSystemPrompt =
-  'You are an expert Stable Diffusion prompt director and scene planner. Produce a detailed production-ready image prompt using deterministic tag syntax rather than prose. ' +
-  'Build the scene from the requested constraints, not merely from LoRA metadata. Treat LoRAs as supporting visual tools, never as the source of the entire scene. The character LoRA is the sole authority for character identity, face, body identity and named-character traits. Supporting LoRAs may contribute only their documented concept, costume element, visual motif, style or other explicitly documented effect. Do not invent unsupported LoRA effects and do not let a LoRA replace explicit scene direction. ' +
-  'The positive prompt must explicitly describe subject identity and visible appearance; current state and action; body pose; hands and arms; head direction and gaze; facial expression and emotional state; clothing and accessories; interaction with objects or surroundings; setting; background and environment; foreground elements when useful; time of day; weather or atmosphere when relevant; camera viewpoint; shot type and framing; perspective; depth and spatial arrangement; lighting direction and quality; color palette and mood; materials and texture; and finishing details. ' +
-  'Preserve explicit scene constraints exactly when possible. Resolve conflicts by prioritizing explicit scene constraints, then character identity, then compatible LoRA concepts. ' +
-  'For every selected LoRA, use its documented activation prompt(s) as exact generation input. Each activation prompt must appear in the final positive prompt at least once, unchanged, and should be placed naturally near the concept it activates; never append all activation prompts as a block at the end. Do not invent, paraphrase, reorder the words inside, or omit documented activation prompts. ' +
-  'The negative prompt should be a useful comma-separated list of targeted failure tags relevant to the requested scene. Do not output LoRA names, checkpoint names, model filenames, base-model labels, angle-bracket LoRA syntax, bracketed LoRA syntax, weights, implementation details, headings, markdown or commentary outside the required JSON object. A model or LoRA name may appear only when it is itself a genuine visual concept the user explicitly requested. Return JSON only with positive_prompt, negative_prompt, rationale.';
-
 const defaultDemographicPrompts: DemographicPrompts = {
   safe:'Keep all generated content non-sexual, non-explicit and suitable for general audiences. Avoid nudity and sexualized framing.',
   suggestive:'Allow mature, flirtatious or suggestive styling, but do not generate explicit sexual acts or graphic sexual detail.',
@@ -326,17 +315,20 @@ function isCompatibleLoraUi(
   lora:LibrarySnapshot['loras'][number],
   checkpoint:LibrarySnapshot['checkpoints'][number],
 ){
-  const keys=[...checkpoint.tags,checkpoint.baseModel || '',checkpoint.name]
-    .map(normUi).filter(x=>x.length>2);
-  const explicit=!!lora.baseModel && keys.some(k=>{
-    const b=normUi(lora.baseModel || '');
-    return k===b || k.includes(b) || b.includes(k);
-  });
-  const tagged=lora.tags.some(tag=>{
-    const t=normUi(tag);
-    return keys.some(k=>k===t || k.includes(t) || t.includes(k));
-  });
-  return explicit || tagged;
+  // Randomized LoRA selection must use the checkpoint's declared base-model
+  // tag. Do not use the checkpoint filename/name or fuzzy substring matches:
+  // those can make an Illustrus LoRA look compatible with an Anima checkpoint.
+  const base=normUi(checkpoint.baseModel || '');
+  if(base.length>2){
+    return lora.tags.some(tag=>normUi(tag)===base);
+  }
+
+  // Older Registry entries may not have baseModel populated. In that case,
+  // require an exact shared tag rather than a fuzzy match.
+  const checkpointTags=new Set(
+    checkpoint.tags.map(normUi).filter(tag=>tag.length>2),
+  );
+  return lora.tags.some(tag=>checkpointTags.has(normUi(tag)));
 }
 
 function isCharacterLoraForCheckpoint(
@@ -396,7 +388,6 @@ function App(){
   const [comfyUrl,setComfyUrl]=useState('http://127.0.0.1:8188');
 
   const [constraints,setConstraints]=useState<Constraints>(emptyConstraints);
-  const [systemPrompt,setSystemPrompt]=useState(defaultSystemPrompt);
   const [demographic,setDemographic]=useState<DemographicLevel>('safe');
   const [demographicPrompts,setDemographicPrompts]=useState<DemographicPrompts>(loadPersistedDemographicPrompts);
   const [maxLoras,setMaxLoras]=useState(4);
@@ -426,7 +417,6 @@ function App(){
   const [settingsOpen,setSettingsOpen]=useState(false);
   const [generationDraft,setGenerationDraft]=useState({
     llm,
-    systemPrompt:demographicPrompts[demographic],
     demographic,
     demographicPrompts,
     maxLoras,
@@ -589,7 +579,6 @@ function App(){
     setProvider(draft.llm.provider);
     setLlm({...draft.llm,provider:draft.llm.provider});
     setConstraints(nextConstraints);
-    setSystemPrompt(draft.demographicPrompts[draft.demographic]);
     setDemographic(draft.demographic);
     const savedDemographicPrompts={...draft.demographicPrompts};
     setDemographicPrompts(savedDemographicPrompts);
@@ -756,10 +745,9 @@ function App(){
         'ACTIVATION PROMPT(S): ' + (l.activationTags.length ? l.activationTags.join(' | ') : '(none)')
       ).join('\n\n');
 
-      // Each generation mode has exactly one system prompt. Never combine it
-      // with the legacy/global system prompt or another demographic policy.
-      const selectedSystemPrompt =
-        demographicPrompts[demographic].trim() + '\n\n' + promptFormatSystemPrompt;
+      // The selected demographic prompt is the complete system prompt.
+      // Nothing else is prepended, appended, or merged into it.
+      const selectedSystemPrompt = demographicPrompts[demographic];
 
       const userPrompt=
         'CHECKPOINT: ' + prep.checkpoint.name + '\n' +
@@ -1276,7 +1264,7 @@ function App(){
             <div className="policy-editor-list">
               {(['safe','suggestive','explicit','no-limits'] as DemographicLevel[]).map(level=>
                 <label className="wide-field" key={level}>
-                  <span>{level.replace('-',' ').toUpperCase()} SYSTEM PROMPT</span>
+                  <span>{level.replace('-',' ').toUpperCase()} SYSTEM PROMPT · SENT EXACTLY TO LLM</span>
                   <textarea className="settings-textarea" value={generationDraft.demographicPrompts[level]} onChange={e=>setGenerationDraft(d=>({...d,demographicPrompts:{...d.demographicPrompts,[level]:e.target.value}}))}/>
                 </label>
               )}
