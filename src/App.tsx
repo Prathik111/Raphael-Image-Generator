@@ -103,47 +103,88 @@ type ThumbnailState = 'loading' | 'ready' | 'error';
 const thumbnailCache = new Map<string,string>();
 const thumbnailPending = new Map<string,Promise<string>>();
 
-function fetchModelThumbnail(reference:string):Promise<string>{
+function thumbnailReferences(reference?:string):string[]{
+  if(!reference) return [];
+  return [...new Set(
+    reference
+      .split('|')
+      .map(value=>value.trim())
+      .filter(Boolean),
+  )];
+}
+
+async function fetchModelThumbnailReference(reference:string):Promise<string>{
   const cached = thumbnailCache.get(reference);
-  if(cached) return Promise.resolve(cached);
+  if(cached) return cached;
   const pending = thumbnailPending.get(reference);
   if(pending) return pending;
-  const request = apiInvoke<string>('path_to_data_url',{path:reference})
-    .then(url=>{
-      thumbnailCache.set(reference,url);
-      return url;
-    })
-    .finally(()=>thumbnailPending.delete(reference));
+
+  const request = (async()=>{
+    let lastError:unknown;
+    for(let attempt=0; attempt<3; attempt++){
+      try{
+        const url=await apiInvoke<string>('path_to_data_url',{path:reference});
+        if(!url || !url.startsWith('data:image/')){
+          throw new Error('Registry returned an invalid thumbnail response.');
+        }
+        thumbnailCache.set(reference,url);
+        return url;
+      }catch(error){
+        lastError=error;
+        if(attempt<2){
+          await new Promise(resolve=>setTimeout(resolve,250 * (2 ** attempt)));
+        }
+      }
+    }
+    throw lastError instanceof Error ? lastError : new Error(String(lastError || 'Thumbnail request failed.'));
+  })().finally(()=>thumbnailPending.delete(reference));
+
   thumbnailPending.set(reference,request);
   return request;
 }
 
+async function fetchModelThumbnail(references:string[]):Promise<string>{
+  let lastError:unknown;
+  for(const reference of references){
+    try{
+      return await fetchModelThumbnailReference(reference);
+    }catch(error){
+      lastError=error;
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error('No Registry thumbnail asset could be loaded.');
+}
+
 function ModelThumbnail({model,iconSize=18}:{model:LibrarySnapshot['checkpoints'][number];iconSize?:number}){
   const frameRef = useRef<HTMLSpanElement|null>(null);
+  const references = useMemo(()=>thumbnailReferences(model.thumbnail),[model.thumbnail]);
+  const referenceKey = references.join('|');
+  const cachedReference = references.find(reference=>thumbnailCache.has(reference));
   const [state,setState] = useState<ThumbnailState>(
-    model.thumbnail && thumbnailCache.has(model.thumbnail) ? 'ready' : 'loading',
+    cachedReference ? 'ready' : 'loading',
   );
   const [src,setSrc] = useState<string|null>(
-    model.thumbnail ? thumbnailCache.get(model.thumbnail) || null : null,
+    cachedReference ? thumbnailCache.get(cachedReference) || null : null,
   );
 
   useEffect(()=>{
-    const reference=model.thumbnail;
-    if(!reference){
+    if(!references.length){
       setState('error');
       setSrc(null);
       return;
     }
-    const cached=thumbnailCache.get(reference);
+
+    const cached=references.find(reference=>thumbnailCache.has(reference));
     if(cached){
-      setSrc(cached);
+      setSrc(thumbnailCache.get(cached) || null);
       setState('ready');
       return;
     }
+
     let active=true;
     let observer:IntersectionObserver|undefined;
     const load=()=>{
-      void fetchModelThumbnail(reference)
+      void fetchModelThumbnail(references)
         .then(url=>{
           if(!active) return;
           setSrc(url);
@@ -155,6 +196,7 @@ function ModelThumbnail({model,iconSize=18}:{model:LibrarySnapshot['checkpoints'
           setState('error');
         });
     };
+
     if(typeof IntersectionObserver==='undefined' || !frameRef.current){
       load();
     }else{
@@ -165,17 +207,33 @@ function ModelThumbnail({model,iconSize=18}:{model:LibrarySnapshot['checkpoints'
       },{rootMargin:'160px'});
       observer.observe(frameRef.current);
     }
+
     return ()=>{
       active=false;
       observer?.disconnect();
     };
-  },[model.thumbnail]);
+  },[referenceKey]);
+
+  const handleImageError=()=>{
+    const failedReference=references.find(reference=>thumbnailCache.get(reference)===src);
+    if(failedReference) thumbnailCache.delete(failedReference);
+    setState('loading');
+    void fetchModelThumbnail(references)
+      .then(url=>{
+        setSrc(url);
+        setState('ready');
+      })
+      .catch(()=>{
+        setSrc(null);
+        setState('error');
+      });
+  };
 
   return <span ref={frameRef} className={'model-thumbnail ' + state}
     aria-label={state==='error' ? 'Thumbnail unavailable' : state==='ready' ? model.name : 'Loading thumbnail'}
     title={state==='error' ? 'Thumbnail unavailable' : model.name}>
     {src && state==='ready'
-      ? <img src={src} alt="" loading="lazy" decoding="async"/>
+      ? <img src={src} alt="" loading="lazy" decoding="async" onError={handleImageError}/>
       : <Layers3 size={iconSize} aria-hidden="true"/>}
   </span>;
 }
