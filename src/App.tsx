@@ -1154,10 +1154,8 @@ function App(){
               {Object.entries(selectedHistory.generationSettings.constraints).map(([key,value])=><div key={key}><span>{key.toUpperCase()}</span><b>{String(value) || 'RANDOM'}</b></div>)}
             </div>
 
-            <div className="history-section-title">SYSTEM PROMPT</div>
+            <div className="history-section-title">SYSTEM PROMPT · DEMOGRAPHIC · SENT EXACTLY TO LLM</div>
             <pre className="history-code">{selectedHistory.generationSettings.systemPrompt}</pre>
-            <div className="history-section-title">DEMOGRAPHIC PROMPT</div>
-            <pre className="history-code">{selectedHistory.generationSettings.demographicPrompts[selectedHistory.generationSettings.demographic]}</pre>
           </section>}
 
           <section className="history-settings-card">
