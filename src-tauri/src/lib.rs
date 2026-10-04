@@ -169,6 +169,7 @@ struct WebHostRuntime {
     port: u16,
     lan_url: String,
     llm: Arc<Mutex<LlmSettings>>,
+    generation_settings: Arc<Mutex<Value>>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -182,6 +183,7 @@ struct AppState {
 struct WebApiState {
     app: AppHandle,
     llm: Arc<Mutex<LlmSettings>>,
+    generation_settings: Arc<Mutex<Value>>,
 }
 
 fn norm(s: &str) -> String { s.trim().to_lowercase().replace([' ', '_', '-', '.', '/'], "") }
@@ -1582,11 +1584,21 @@ async fn web_command(
         }
         "get_host_llm_config"=>{
             let settings = state.llm.lock().await.clone();
+            let generation_settings=state.generation_settings.lock().await.clone();
             serde_json::to_value(json!({
                 "provider": settings.provider,
                 "baseUrl": settings.base_url,
-                "model": settings.model
+                "model": settings.model,
+                "generationSettings": generation_settings
             })).map_err(|e|e.to_string())
+        }
+        "get_host_generation_settings"=>{
+            serde_json::to_value(state.generation_settings.lock().await.clone()).map_err(|e|e.to_string())
+        }
+        "update_web_host_generation_settings"=>{
+            let settings_value=body.get("generationSettings").cloned().unwrap_or(req_value);
+            *state.generation_settings.lock().await=settings_value;
+            Ok(Value::Null)
         }
         "update_web_host_llm"=>{
             let settings_value=body.get("llmSettings").cloned().unwrap_or(req_value);
@@ -1780,11 +1792,15 @@ async fn start_web_host(
     state: tauri::State<'_,AppState>,
     port: Option<u16>,
     llm_settings: Option<LlmSettings>,
+    generation_settings: Option<Value>,
 )->Result<Value,String>{
     let mut host=state.web_host.lock().await;
     if let Some(existing)=host.as_ref(){
         if let Some(settings) = llm_settings {
             *existing.llm.lock().await = settings;
+        }
+        if let Some(settings) = generation_settings {
+            *existing.generation_settings.lock().await = settings;
         }
         return Ok(json!({"running":true,"port":existing.port,"localUrl":existing.lan_url,"lanUrl":existing.lan_url}));
     }
@@ -1805,7 +1821,8 @@ async fn start_web_host(
         max_tokens: 8192,
         context_tokens: 32768,
     })));
-    let api_state=WebApiState{app:app.clone(),llm:llm.clone()};
+    let generation_settings=Arc::new(Mutex::new(generation_settings.unwrap_or_else(||json!({}))));
+    let api_state=WebApiState{app:app.clone(),llm:llm.clone(),generation_settings:generation_settings.clone()};
     let router=Router::new()
         .route("/health", axum::routing::get(|| async {
             AxumJson(json!({"ok":true,"service":"raphael-prompt-forge"}))
@@ -1818,7 +1835,7 @@ async fn start_web_host(
         let _=axum::serve(listener,router).await;
     });
     let url=json!({"running":true,"port":actual_port,"localUrl":lan,"lanUrl":lan});
-    *host=Some(WebHostRuntime{port:actual_port,lan_url:lan,llm,task});
+    *host=Some(WebHostRuntime{port:actual_port,lan_url:lan,llm,generation_settings,task});
     Ok(url)
 }
 
@@ -1845,7 +1862,7 @@ pub fn run(){
         .invoke_handler(tauri::generate_handler![
             pick_folder,discover_raphael_config,discover_raphael_roots,scan_library,list_provider_models,
             prepare_generation,stream_llm,parse_prompt_pair,finalize_prompt_pair,build_workflow,inject_prompts,
-            submit_to_comfy,monitor_comfy_generation,load_history,append_history,path_to_data_url,start_web_host,update_web_host_llm,stop_web_host
+            submit_to_comfy,monitor_comfy_generation,load_history,append_history,path_to_data_url,start_web_host,update_web_host_llm,update_web_host_generation_settings,stop_web_host
         ])
         .run(tauri::generate_context!())
         .expect("error while running Raphael Prompt Forge");
