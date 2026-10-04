@@ -132,6 +132,7 @@ export interface GenerationSettings {
   maxTagLength: number;
   plannerTemperature: number;
   tagTemperature: number;
+  maxCharacterLoras: number;
 }
 
 export interface WebHostInfo {
