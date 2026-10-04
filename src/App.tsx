@@ -1136,6 +1136,7 @@ function App(){
             selectedLoraIds:combinedIds,
             ...constraints,
             randomLoraMax:Math.min(maxLoras,constraints.randomLoraMax),
+            maxCharacterLoras:generationDraft.maxCharacterLoras,
             registryUrl:registryUrl || null,
           },
         });
@@ -1264,6 +1265,7 @@ function App(){
           selectedLoraIds:generationSelectedLoraIds,
           ...constraints,
           randomLoraMax:Math.min(maxLoras,constraints.randomLoraMax),
+          maxCharacterLoras:generationDraft.maxCharacterLoras,
           registryUrl:registryUrl || null,
         },
       });
