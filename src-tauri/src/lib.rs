@@ -1281,19 +1281,12 @@ fn build_workflow(req:WorkflowRequest)->Result<Value,String>{
 
     map.insert("5".into(),json!({
         "class_type":"CLIPTextEncode",
-        "inputs":{"clip":clip_ref,"text":"__POSITIVE_PROMPT__"}
+        "inputs":{"clip":clip_ref.clone(),"text":"__POSITIVE_PROMPT__"}
     }));
     map.insert("6".into(),json!({
         "class_type":"CLIPTextEncode",
-        "inputs":{"clip":["13",1],"text":"__NEGATIVE_PROMPT__"}
+        "inputs":{"clip":clip_ref,"text":"__NEGATIVE_PROMPT__"}
     }));
-
-    if use_unet_loader {
-        map.get_mut("6")
-            .and_then(|node| node.get_mut("inputs"))
-            .and_then(|inputs| inputs.as_object_mut())
-            .map(|inputs| inputs.insert("clip".into(), json!(["4",0])));
-    }
 
     map.insert("8".into(),json!({
         "class_type":"EmptyLatentImage",
