@@ -31,6 +31,7 @@ urlencoding = "2"
 anyhow = "1"
 axum = "0.8"
 tower-http = { version = "0.6", features = ["fs"] }
+local-ip-address = "0.6.13"
 tokio-stream = "0.1"
 tokio-tungstenite = { version = "0.30", features = ["connect"] }
 
