@@ -522,6 +522,7 @@ async fn hydrate_registry_model(
     let assets_future = registry_json::<Vec<RegistryAsset>>(base_url, token, &assets_path);
     let (versions, files, tags, assets) = tokio::join!(versions_future, files_future, tags_future, assets_future);
     let versions = versions.unwrap_or_default();
+    let files = files.unwrap_or_default();
     let tags = tags.unwrap_or_default();
     let assets = assets.unwrap_or_default();
 
