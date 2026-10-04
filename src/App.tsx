@@ -904,10 +904,20 @@ function App(){
       if(config.registry_url) setRegistryUrl(config.registry_url);
 
       if(!isTauriRuntime){
-        const hostLlm=await apiInvoke<{provider:ProviderKind;baseUrl:string;model:string}>('get_host_llm_config');
-        const nextLlm={...llm,provider:hostLlm.provider,baseUrl:hostLlm.baseUrl,model:hostLlm.model || ''};
+        const hostConfig=await apiInvoke<{
+          provider:ProviderKind;
+          baseUrl:string;
+          model:string;
+          generationSettings?:Partial<StoredGenerationSettings>;
+        }>('get_host_llm_config');
+        const hostGeneration=hostConfig.generationSettings || {};
+        const nextLlm={...llm,provider:hostConfig.provider,baseUrl:hostConfig.baseUrl,model:hostConfig.model || ''};
         setLlm(nextLlm);
-        setGenerationDraft(d=>({...d,llm:{...d.llm,provider:hostLlm.provider,baseUrl:hostLlm.baseUrl,model:hostLlm.model || ''}}));
+        setGenerationDraft(d=>({
+          ...d,
+          ...hostGeneration,
+          llm:{...d.llm,...(hostGeneration.llm || {}),provider:hostConfig.provider,baseUrl:hostConfig.baseUrl,model:hostConfig.model || ''},
+        }));
         await fetchModels(nextLlm);
         setLanClientReady(true);
       }
@@ -918,11 +928,14 @@ function App(){
     }
   }
 
-  async function loadHistory(){
+  async function loadHistory(showError=false){
     try{
       const records=await apiInvoke<Array<{payload:GenerationRecord}>>('load_history');
-      setHistory(records.map(x=>x.payload));
-    }catch{}
+      if(!Array.isArray(records)) throw new Error('History response was not a list.');
+      setHistory(records.map(x=>x.payload).filter(Boolean));
+    }catch(e){
+      if(showError) setError('Could not load host generation history: '+String(e));
+    }
   }
 
   async function fetchModels(settings:LlmSettings){
@@ -1052,6 +1065,82 @@ function App(){
     },400);
     return ()=>window.clearTimeout(timeout);
   },[generationDraft.llm,webHost,lanClientReady]);
+
+  useEffect(()=>{
+    if(!isTauriRuntime || !webHost) return;
+    const timeout=window.setTimeout(()=>{
+      void apiInvoke('update_web_host_generation_settings',{generationSettings:generationDraft})
+        .catch(e=>setWebHostError(String(e)));
+    },450);
+    return ()=>window.clearTimeout(timeout);
+  },[generationDraft,webHost]);
+
+  useEffect(()=>{
+    if(isTauriRuntime || !lanClientReady) return;
+    const refresh=async()=>{
+      try{
+        const hostGeneration=await apiInvoke<Partial<StoredGenerationSettings>>('get_host_generation_settings');
+        setGenerationDraft(current=>{
+          const currentSignature=JSON.stringify({
+            plannerSystemPrompt:current.plannerSystemPrompt,
+            tagSystemPrompt:current.tagSystemPrompt,
+            repairSystemPrompt:current.repairSystemPrompt,
+            userPromptTemplate:current.userPromptTemplate,
+            expansionPromptTemplate:current.expansionPromptTemplate,
+            demographic:current.demographic,
+            demographicPrompts:current.demographicPrompts,
+            minPositiveTags:current.minPositiveTags,
+            minNegativeTags:current.minNegativeTags,
+            maxNegativeTags:current.maxNegativeTags,
+            maxTagLength:current.maxTagLength,
+            plannerTemperature:current.plannerTemperature,
+            tagTemperature:current.tagTemperature,
+            tagGenerationRetries:current.tagGenerationRetries,
+            maxCharacterLoras:current.maxCharacterLoras,
+            maxLoras:current.maxLoras,
+            randomLoraMin:current.randomLoraMin,
+            randomLoraMax:current.randomLoraMax,
+          });
+          const hostSignature=JSON.stringify({
+            plannerSystemPrompt:hostGeneration.plannerSystemPrompt,
+            tagSystemPrompt:hostGeneration.tagSystemPrompt,
+            repairSystemPrompt:hostGeneration.repairSystemPrompt,
+            userPromptTemplate:hostGeneration.userPromptTemplate,
+            expansionPromptTemplate:hostGeneration.expansionPromptTemplate,
+            demographic:hostGeneration.demographic,
+            demographicPrompts:hostGeneration.demographicPrompts,
+            minPositiveTags:hostGeneration.minPositiveTags,
+            minNegativeTags:hostGeneration.minNegativeTags,
+            maxNegativeTags:hostGeneration.maxNegativeTags,
+            maxTagLength:hostGeneration.maxTagLength,
+            plannerTemperature:hostGeneration.plannerTemperature,
+            tagTemperature:hostGeneration.tagTemperature,
+            tagGenerationRetries:hostGeneration.tagGenerationRetries,
+            maxCharacterLoras:hostGeneration.maxCharacterLoras,
+            maxLoras:hostGeneration.maxLoras,
+            randomLoraMin:hostGeneration.randomLoraMin,
+            randomLoraMax:hostGeneration.randomLoraMax,
+          });
+          if(currentSignature===hostSignature) return current;
+          return {
+            ...current,
+            ...hostGeneration,
+            llm:current.llm,
+          };
+        });
+      }catch{}
+    };
+    void refresh();
+    const interval=window.setInterval(()=>void refresh(),2500);
+    return ()=>window.clearInterval(interval);
+  },[lanClientReady]);
+
+  useEffect(()=>{
+    if(tab!=='history' || isTauriRuntime) return;
+    void loadHistory(true);
+    const interval=window.setInterval(()=>void loadHistory(),2500);
+    return ()=>window.clearInterval(interval);
+  },[tab]);
 
 
   async function rollStack():Promise<string[]|null>{
@@ -1657,7 +1746,11 @@ function App(){
     setWebHostBusy(true);
     setWebHostError('');
     try{
-      const info=await apiInvoke<WebHostInfo>('start_web_host',{port:1424,llmSettings:llm});
+      const info=await apiInvoke<WebHostInfo>('start_web_host',{
+        port:1424,
+        llmSettings:llm,
+        generationSettings:generationDraft,
+      });
       setWebHost(info);
       setToast('LAN host ready · ' + info.lanUrl);
     }catch(e){
@@ -1861,6 +1954,10 @@ function App(){
         </div>}
 
       {tab==='history' && <section className="history-panel history-detail-panel">
+        <div className="history-mobile-nav">
+          <button className="ghost-btn" onClick={()=>{setTab('generate');setSelectedHistoryId('')}}><WandSparkles size={13}/> GENERATE</button>
+          <button className="ghost-btn" onClick={()=>void loadHistory(true)}><RefreshCw size={13}/> REFRESH HISTORY</button>
+        </div>
         {!selectedHistory ? (
           <div className="empty-state"><History size={22}/><div><b>NO GENERATIONS</b><span>Completed generations will appear here.</span></div></div>
         ) : <>
