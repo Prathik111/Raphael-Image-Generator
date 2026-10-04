@@ -784,6 +784,12 @@ async fn list_provider_models(settings:LlmSettings)->Result<Vec<String>,String>{
 
 fn random_one(values:&[&str])->String{values.choose(&mut rand::rng()).unwrap_or(&"").to_string()}
 
+fn registry_model_id(id: &str) -> &str {
+    id.split_once("::file:")
+        .map(|(model_id, _)| model_id)
+        .unwrap_or(id)
+}
+
 #[tauri::command]
 async fn prepare_generation(req: PrepareRequest) -> Result<PreparedGeneration, String> {
     let (registry_url, token) = ensure_registry(req.registry_url.as_deref()).await?;
@@ -795,10 +801,11 @@ async fn prepare_generation(req: PrepareRequest) -> Result<PreparedGeneration, S
         .filter(|value| value.len() > 2)
         .collect();
 
+    let checkpoint_registry_id = registry_model_id(&req.checkpoint.id).to_string();
     let mut compatible_ids = std::collections::HashSet::new();
 
     if req.selected_lora_ids.is_empty() {
-        let encoded_checkpoint = urlencoding::encode(&req.checkpoint.id);
+        let encoded_checkpoint = urlencoding::encode(&checkpoint_registry_id);
         let result: serde_json::Value = registry_json(
             &registry_url, &token,
             &format!("/api/v1/models/{encoded_checkpoint}/compatibility?type=lora")
@@ -807,20 +814,21 @@ async fn prepare_generation(req: PrepareRequest) -> Result<PreparedGeneration, S
         if let Some(candidates) = result.get("candidates").and_then(|value| value.as_array()) {
             for candidate in candidates {
                 if let Some(id) = candidate.get("id").and_then(|value| value.as_str()) {
-                    compatible_ids.insert(id.to_string());
+                    compatible_ids.insert(registry_model_id(id).to_string());
                 }
             }
         }
     } else {
         for lora_id in &req.selected_lora_ids {
-            let checkpoint = urlencoding::encode(&req.checkpoint.id);
-            let lora = urlencoding::encode(lora_id);
+            let checkpoint = urlencoding::encode(&checkpoint_registry_id);
+            let lora_registry_id = registry_model_id(lora_id);
+            let lora = urlencoding::encode(lora_registry_id);
             let result: serde_json::Value = registry_json(
                 &registry_url, &token,
                 &format!("/api/v1/compatibility?checkpoint={checkpoint}&lora={lora}")
             ).await?;
             if result.get("compatible").and_then(|value| value.as_bool()) == Some(true) {
-                compatible_ids.insert(lora_id.clone());
+                compatible_ids.insert(lora_registry_id.to_string());
             } else {
                 return Err(format!("LoRA '{}' is not compatible with checkpoint '{}'.", lora_id, req.checkpoint.name));
             }
@@ -828,7 +836,7 @@ async fn prepare_generation(req: PrepareRequest) -> Result<PreparedGeneration, S
     }
 
     let compatible: Vec<&ModelInfo> = req.loras.iter()
-        .filter(|lora| compatible_ids.contains(&lora.id))
+        .filter(|lora| compatible_ids.contains(registry_model_id(&lora.id)))
         .collect();
 
     if compatible.is_empty() {
@@ -836,7 +844,7 @@ async fn prepare_generation(req: PrepareRequest) -> Result<PreparedGeneration, S
     }
 
     let manual: Vec<&ModelInfo> = req.selected_lora_ids.iter()
-        .filter_map(|id| compatible.iter().copied().find(|lora| &lora.id == id))
+        .filter_map(|id| compatible.iter().copied().find(|lora| lora.id == *id))
         .collect();
 
     let chars: Vec<&ModelInfo> = compatible.iter().copied()
