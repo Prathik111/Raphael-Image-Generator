@@ -187,6 +187,10 @@ struct WebApiState {
 fn norm(s: &str) -> String { s.trim().to_lowercase().replace([' ', '_', '-', '.', '/'], "") }
 fn base_url(s: &str) -> String { s.trim().trim_end_matches('/').to_string() }
 
+fn web_client_path_is_allowed(path: &str) -> bool {
+    path.trim_start().starts_with("registry://")
+}
+
 fn is_character_lora_for_checkpoint(
     lora: &ModelInfo,
     checkpoint: &ModelInfo,
@@ -1625,6 +1629,9 @@ async fn web_command(
             let path=req_value.get("path").and_then(|x|x.as_str())
                 .or_else(||req_value.as_str())
                 .ok_or_else(||"path is required".to_string())?;
+            if !web_client_path_is_allowed(path) {
+                return Err("LAN clients may only request Registry thumbnail assets.".into());
+            }
             serde_json::to_value(path_to_data_url(path.to_string()).await?).map_err(|e|e.to_string())
         }
         _=>Err(format!("Unknown API command: {}",command))
@@ -1837,6 +1844,14 @@ pub fn run(){
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn web_client_thumbnail_access_is_registry_only() {
+        assert!(web_client_path_is_allowed("registry://model-123/asset-456"));
+        assert!(web_client_path_is_allowed("  registry://model-123/asset-456"));
+        assert!(!web_client_path_is_allowed("C:\\Windows\\System32\\drivers\\etc\\hosts"));
+        assert!(!web_client_path_is_allowed("D:/ComfyUI/models/checkpoints/model.safetensors"));
+    }
+
     #[test]
     fn registry_absolute_file_path_does_not_require_client_models_root() {
         let temp = tempfile::tempdir().expect("tempdir");
