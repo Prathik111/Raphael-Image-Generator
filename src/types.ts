@@ -110,6 +110,9 @@ export interface DemographicPrompts {
 export interface GenerationSettings {
   llm: LlmSettings;
   systemPrompt: string;
+  plannerSystemPrompt: string;
+  tagSystemPrompt: string;
+  repairSystemPrompt: string;
   demographic: DemographicLevel;
   demographicPrompts: DemographicPrompts;
   userPromptTemplate: string;
