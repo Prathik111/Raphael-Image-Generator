@@ -730,10 +730,6 @@ function App(){
   const [minNegativeTags,setMinNegativeTags]=useState(
     Math.max(1,Math.min(persistedGenerationSettings.maxNegativeTags ?? defaultMaxNegativeTags,persistedGenerationSettings.minNegativeTags ?? defaultMinNegativeTags)),
   );
-  const [maxNegativeTags,setMaxNegativeTags]=useState(
-    Math.max(1,Math.min(absoluteMaxTagLimit,persistedGenerationSettings.maxNegativeTags ?? defaultMaxNegativeTags)),
-  );
-
   const [prepared,setPrepared]=useState<PreparedGeneration|null>(null);
   const [prompts,setPrompts]=useState<PromptPair|null>(null);
   const [stream,setStream]=useState('');
@@ -994,7 +990,6 @@ function App(){
     setCfg(normalizedDraft.cfg);
     setSampler(normalizedDraft.sampler);
     setMinPositiveTags(normalizedDraft.minPositiveTags);
-    setMaxNegativeTags(normalizedDraft.maxNegativeTags);
     setMinNegativeTags(normalizedDraft.minNegativeTags);
     try{
       window.localStorage.setItem(
