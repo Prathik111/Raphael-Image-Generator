@@ -807,6 +807,7 @@ function App(){
   const [loraSearch,setLoraSearch]=useState('');
 
   const [webHost,setWebHost]=useState<WebHostInfo|null>(null);
+  const [lanClientReady,setLanClientReady]=useState(false);
   const [webHostBusy,setWebHostBusy]=useState(false);
   const [webHostError,setWebHostError]=useState('');
 
@@ -908,6 +909,7 @@ function App(){
         setLlm(nextLlm);
         setGenerationDraft(d=>({...d,llm:{...d.llm,provider:hostLlm.provider,baseUrl:hostLlm.baseUrl,model:hostLlm.model || ''}}));
         await fetchModels(nextLlm);
+        setLanClientReady(true);
       }
 
       await scan(config.models_root || comfyRoot,config.registry_url || undefined);
@@ -1038,12 +1040,18 @@ function App(){
   },[generationDraft]);
 
   useEffect(()=>{
-    if(!isTauriRuntime || !webHost) return;
+    if(isTauriRuntime){
+      if(!webHost) return;
+    }else if(!lanClientReady){
+      return;
+    }
+
     const timeout=window.setTimeout(()=>{
-      void apiInvoke('update_web_host_llm',{llmSettings:generationDraft.llm}).catch(e=>setWebHostError(String(e)));
+      void apiInvoke('update_web_host_llm',{llmSettings:generationDraft.llm})
+        .catch(e=>setWebHostError(String(e)));
     },400);
     return ()=>window.clearTimeout(timeout);
-  },[generationDraft.llm,webHost]);
+  },[generationDraft.llm,webHost,lanClientReady]);
 
 
   async function rollStack():Promise<string[]|null>{
