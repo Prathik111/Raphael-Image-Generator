@@ -1588,6 +1588,11 @@ async fn web_command(
                 "model": settings.model
             })).map_err(|e|e.to_string())
         }
+        "update_web_host_llm"=>{
+            let settings=serde_json::from_value::<LlmSettings>(req_value).map_err(|e|e.to_string())?;
+            *state.llm.lock().await=settings;
+            Ok(Value::Null)
+        }
         "scan_library"=>{
             let request=serde_json::from_value::<ScanRequest>(req_value).map_err(|e|e.to_string())?;
             serde_json::to_value(scan_library(request).await?).map_err(|e|e.to_string())
