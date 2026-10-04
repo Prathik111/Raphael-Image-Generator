@@ -1702,7 +1702,7 @@ function App(){
 
           <section className="settings-section">
             <div className="settings-section-title">EFFECTIVE SYSTEM PROMPTS</div>
-            <div className="settings-note">
+            <div className="field-help">
               These are the exact system prompts currently sent to the selected LLM for each phase.
               Both phases use the selected demographic system prompt; their user prompts are different.
             </div>
