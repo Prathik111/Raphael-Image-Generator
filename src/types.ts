@@ -128,6 +128,7 @@ export interface GenerationSettings {
   sampler: string;
   minPositiveTags: number;
   minNegativeTags: number;
+  maxNegativeTags: number;
 }
 
 export interface WebHostInfo {
