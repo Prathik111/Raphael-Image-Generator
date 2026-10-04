@@ -88,6 +88,7 @@ interface StoredGenerationSettings {
   sampler?: string;
   userPromptTemplate?: string;
   expansionPromptTemplate?: string;
+  manualLoraIds?: string[];
 }
 
 function loadPersistedGenerationSettings(): StoredGenerationSettings {
@@ -492,8 +493,11 @@ function App(){
   const [busy,setBusy]=useState(false);
   const [error,setError]=useState('');
   const [toast,setToast]=useState('');
-  const [selectedLoraIds,setSelectedLoraIds]=useState<string[]>([]);
-  const [manualLoraIds,setManualLoraIds]=useState<string[]>([]);
+  const persistedManualLoraIds=Array.isArray(persistedGenerationSettings.manualLoraIds)
+    ? persistedGenerationSettings.manualLoraIds.filter(id=>typeof id==='string')
+    : [];
+  const [selectedLoraIds,setSelectedLoraIds]=useState<string[]>(persistedManualLoraIds);
+  const [manualLoraIds,setManualLoraIds]=useState<string[]>(persistedManualLoraIds);
 
   const [settingsOpen,setSettingsOpen]=useState(false);
   const [generationDraft,setGenerationDraft]=useState({
@@ -661,8 +665,8 @@ function App(){
       });
 
       const ids=new Set(snap.loras.map(x=>x.id));
-      setSelectedLoraIds(current=>current.filter(id=>ids.has(id)));
       setManualLoraIds(current=>current.filter(id=>ids.has(id)));
+      setSelectedLoraIds(current=>current.filter(id=>ids.has(id)));
       setStageStatus('library','done');
       if(snap.warnings.length){
         setError(snap.warnings.join(' '));
@@ -677,6 +681,18 @@ function App(){
   function updateConstraint<K extends keyof Constraints>(key:K,value:Constraints[K]){
     setConstraints(x=>({...x,[key]:value}));
   }
+
+  useEffect(()=>{
+    try{
+      window.localStorage.setItem(
+        generationSettingsStorageKey,
+        JSON.stringify({
+          ...loadPersistedGenerationSettings(),
+          manualLoraIds,
+        }),
+      );
+    }catch{}
+  },[manualLoraIds]);
 
   useEffect(()=>{
     const draft=generationDraft;
