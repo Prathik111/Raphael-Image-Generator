@@ -130,6 +130,8 @@ export interface GenerationSettings {
   minNegativeTags: number;
   maxNegativeTags: number;
   maxTagLength: number;
+  plannerTemperature: number;
+  tagTemperature: number;
 }
 
 export interface WebHostInfo {
