@@ -189,6 +189,17 @@ struct WebApiState {
 fn norm(s: &str) -> String { s.trim().to_lowercase().replace([' ', '_', '-', '.', '/'], "") }
 fn base_url(s: &str) -> String { s.trim().trim_end_matches('/').to_string() }
 
+fn public_generation_settings(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut public_map = map.clone();
+            public_map.remove("llm");
+            Value::Object(public_map)
+        }
+        _ => json!({}),
+    }
+}
+
 fn web_client_path_is_allowed(path: &str) -> bool {
     path.trim_start().starts_with("registry://")
 }
@@ -1584,7 +1595,7 @@ async fn web_command(
         }
         "get_host_llm_config"=>{
             let settings = state.llm.lock().await.clone();
-            let generation_settings=state.generation_settings.lock().await.clone();
+            let generation_settings=public_generation_settings(&state.generation_settings.lock().await);
             serde_json::to_value(json!({
                 "provider": settings.provider,
                 "baseUrl": settings.base_url,
@@ -1593,7 +1604,8 @@ async fn web_command(
             })).map_err(|e|e.to_string())
         }
         "get_host_generation_settings"=>{
-            serde_json::to_value(state.generation_settings.lock().await.clone()).map_err(|e|e.to_string())
+            let generation_settings=public_generation_settings(&state.generation_settings.lock().await);
+            serde_json::to_value(generation_settings).map_err(|e|e.to_string())
         }
         "update_web_host_generation_settings"=>{
             let settings_value=body.get("generationSettings").cloned().unwrap_or(req_value);
@@ -1846,6 +1858,19 @@ async fn update_web_host_llm(state:tauri::State<'_,AppState>,llm_settings:LlmSet
         return Err("LAN web host is not running.".into());
     };
     *runtime.llm.lock().await = llm_settings;
+    Ok(())
+}
+
+#[tauri::command]
+async fn update_web_host_generation_settings(
+    state:tauri::State<'_,AppState>,
+    generation_settings:Value,
+)->Result<(),String>{
+    let host=state.web_host.lock().await;
+    let Some(runtime)=host.as_ref() else {
+        return Err("LAN web host is not running.".into());
+    };
+    *runtime.generation_settings.lock().await=generation_settings;
     Ok(())
 }
 
