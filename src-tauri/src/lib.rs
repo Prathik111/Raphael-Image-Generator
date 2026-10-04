@@ -1813,6 +1813,7 @@ mod tests {
         std::fs::write(&model_path, b"model").expect("model file");
 
         let file = RegistryFile {
+            id: "test-file".into(),
             version_id: None,
             path: model_path.to_string_lossy().to_string(),
             relative_path: None,
