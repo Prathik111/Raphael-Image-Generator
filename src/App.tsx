@@ -127,20 +127,11 @@ Use the previous JSON only as the material to repair. Do not blindly append rand
 CONTENT POLICY:
 {{DEMOGRAPHIC_POLICY}}`;
 
-const defaultPlanningPrompt = `PLANNING PHASE. Do not write image-model prompt tags yet.
-Decide the concrete visual plan that the next stage will convert into deterministic tags.
-
-Return JSON only with exactly these string fields:
-character, action, pose, setting, background, expression, dress, composition, lighting, camera, framing.
-
-Use short canonical choices, not sentences or metaphors.
-Preserve any explicit user constraints exactly enough to satisfy them.
-When a field is blank/random, make a specific decision.
-The plan must be internally consistent: pose, action, expression, camera and framing must match the setting and background.
-Do not mention model names, filenames or LoRA implementation syntax.
+const defaultPlanningPrompt = `GENERATION INPUT FOR THE PLANNER
 
 CHECKPOINT: {{CHECKPOINT}}
 BASE: {{BASE}}
+
 SELECTED LoRA METADATA:
 {{LORA_METADATA}}
 
@@ -153,7 +144,9 @@ DRESS: {{DRESS}}
 COMPOSITION: {{COMPOSITION}}
 EXTRA: {{EXTRA}}`;
 
-const defaultUserPromptTemplate = `CHECKPOINT: {{CHECKPOINT}}
+const defaultUserPromptTemplate = `GENERATION INPUT FOR TAG CREATION
+
+CHECKPOINT: {{CHECKPOINT}}
 BASE: {{BASE}}
 COMPATIBILITY: {{COMPATIBILITY}}
 
@@ -169,13 +162,15 @@ DRESS: {{DRESS}}
 COMPOSITION: {{COMPOSITION}}
 EXTRA: {{EXTRA}}
 
-Write the FINAL positive and negative prompts that will be sent directly to the image model. The positive prompt must be one long, coherent, comma-separated tag string of 90-160 words with at least 24 meaningful visual tags or short phrases. Use the selected LoRA metadata as actual prompt-building input, not as reference-only information. For every documented activation prompt, include the exact activation phrase in the positive prompt at least once, unchanged, and place it naturally next to the visual concept it activates instead of collecting activation prompts at the end. The LoRA description explains what visual concept the activation prompt controls; use that description to decide where and how that activation phrase belongs. Do not invent or paraphrase activation prompts, and do not omit them. Do not expose LoRA implementation syntax such as <lora:...> or weighted [LoRA - ...] notation. Do not mention checkpoint/model names, filenames or base-model labels. Explicitly cover subject state/action, pose, hands/arms, head direction, gaze, facial expression, emotional state, clothing/accessories, interaction, setting, background/environment, atmosphere, camera viewpoint, framing, perspective, depth, lighting, color/mood, materials and finishing details using short literal tags or compact phrases only. Never turn these into sentences or metaphors. The negative prompt should be a useful 20-35 item comma-separated list of short concrete failure tags targeted to the actual image and selected LoRAs. Return JSON only.`;
+LOCKED PLAN:
+The application will append the planner's locked visual decisions after this context.`;
 
-const defaultExpansionPromptTemplate = `EXPANSION PASS. Rewrite the previous result as the final production prompt pair in deterministic tag format. Preserve every required scene constraint and every documented LoRA activation prompt. Each activation prompt must appear exactly as documented, at least once, beside the visual concept described by its LoRA, not as an appended block at the end. Use the LoRA descriptions to understand the intended visual effect. Do not remove or paraphrase activation prompts. Remove checkpoint names, model filenames, LoRA names and implementation syntax such as <lora:...> or weighted [LoRA - ...] notation. Rewrite the positive prompt as ONE long, coherent comma-separated tag string of 90-160 words with at least 24 meaningful visual tags or short phrases. No sentences, metaphors, storytelling, poetic language or sentence punctuation. Use literal canonical tags, mostly 1-6 words each. Explicitly include subject identity, visible appearance, current state, action/activity, body pose, hands/arms, head direction, gaze, facial expression, emotional state, clothing/accessories, interaction with surroundings, setting, background/environment, atmosphere, camera viewpoint, shot type, framing, perspective, depth, lighting direction/quality, color/mood, materials/textures and finishing details. Do not rely on any LoRA to provide expression, pose, state, background or composition. Also provide a targeted 20-35 item negative tag list. Return JSON only.
+const defaultExpansionPromptTemplate = `GENERATION INPUT FOR TAG REPAIR
 
 CHECKPOINT: {{CHECKPOINT}}
 BASE: {{BASE}}
 COMPATIBILITY: {{COMPATIBILITY}}
+
 SCENE:
 CHARACTER: {{CHARACTER}}
 SETTING: {{SETTING}}
@@ -1645,8 +1640,12 @@ function App(){
               {Object.entries(selectedHistory.generationSettings.constraints).map(([key,value])=><div key={key}><span>{key.toUpperCase()}</span><b>{String(value) || 'RANDOM'}</b></div>)}
             </div>
 
-            <div className="history-section-title">SYSTEM PROMPT · DEMOGRAPHIC · SENT EXACTLY TO LLM</div>
-            <pre className="history-code">{selectedHistory.generationSettings.systemPrompt}</pre>
+            <div className="history-section-title">PLANNER SYSTEM PROMPT · SENT EXACTLY TO MODEL</div>
+            <pre className="history-code">{selectedHistory.generationSettings.plannerSystemPrompt || selectedHistory.generationSettings.systemPrompt}</pre>
+            <div className="history-section-title">TAG GENERATION SYSTEM PROMPT · SENT EXACTLY TO MODEL</div>
+            <pre className="history-code">{selectedHistory.generationSettings.tagSystemPrompt || selectedHistory.generationSettings.systemPrompt}</pre>
+            <div className="history-section-title">TAG REPAIR SYSTEM PROMPT · SENT EXACTLY TO MODEL</div>
+            <pre className="history-code">{selectedHistory.generationSettings.repairSystemPrompt || selectedHistory.generationSettings.systemPrompt}</pre>
             <div className="history-section-title">PRIMARY USER PROMPT TEMPLATE</div>
             <pre className="history-code">{selectedHistory.generationSettings.userPromptTemplate || defaultUserPromptTemplate}</pre>
             <div className="history-section-title">EXPANSION USER PROMPT TEMPLATE</div>
