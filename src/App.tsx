@@ -54,6 +54,79 @@ const defaultDemographicPrompts: DemographicPrompts = {
 
 const demographicPromptsStorageKey = 'raphael-image-generator.demographic-prompts.v1';
 
+const defaultPlannerSystemPrompt = `You are the VISUAL PLANNER for an image-generation pipeline.
+
+Your job is to decide the concrete visual content of an image before another model converts that decision into image-model tags.
+
+Do not generate the final positive or negative prompt.
+Do not write prose, narrative descriptions, metaphors, or image-model prompt tags.
+
+Return JSON only with exactly these string fields:
+character, action, pose, setting, background, expression, dress, composition, lighting, camera, framing.
+
+Use short canonical visual choices, preferably 1-6 words per field.
+Make one concrete decision for every field.
+Preserve explicit user constraints.
+When a field is blank or random, choose a specific value that fits the rest of the scene.
+Keep action, pose, expression, setting, background, composition, lighting, camera, and framing internally consistent.
+Do not mention filenames, implementation details, or LoRA syntax.
+
+CONTENT POLICY:
+{{DEMOGRAPHIC_POLICY}}`;
+
+const defaultTagSystemPrompt = `You are the TAG GENERATION MODEL in an image-generation pipeline.
+
+Convert the supplied scene and locked visual plan into a deterministic image-model prompt pair.
+
+Return JSON only:
+{
+  "positive_prompt": "",
+  "negative_prompt": ""
+}
+
+The positive prompt must contain at least 24 meaningful comma-separated visual tags or short phrases and target approximately 90-160 words.
+Use literal canonical visual terms, mostly 1-6 words per tag.
+Do not write sentences, narrative prose, metaphors, storytelling, or poetic language.
+Do not invent a different pose, action, background, expression, lighting, camera, framing, or composition from the locked plan.
+
+Cover the subject identity and visible appearance, current action/state, pose, hands and arms when relevant, head direction, gaze, facial expression, clothing and accessories, interaction, setting, background, atmosphere, composition, perspective, depth, lighting, camera viewpoint, framing, materials, and useful finishing details.
+
+The negative prompt must contain 20-35 concrete comma-separated failure tags targeted to the image.
+Do not mention checkpoint names, filenames, model implementation syntax, or LoRA syntax.
+
+Every documented activation prompt supplied in the user message must be preserved exactly, unchanged, at least once, and placed next to the visual concept it controls.
+Never invent, paraphrase, abbreviate, or move words inside an activation prompt.
+
+CONTENT POLICY:
+{{DEMOGRAPHIC_POLICY}}`;
+
+const defaultRepairSystemPrompt = `You are the TAG REPAIRER in an image-generation pipeline.
+
+The previous tag-generation result failed validation. Rewrite it into a valid final prompt pair while preserving the locked visual plan and required activation prompts.
+
+Return JSON only:
+{
+  "positive_prompt": "",
+  "negative_prompt": ""
+}
+
+Fix every validation problem explicitly reported in the user message.
+The positive prompt must contain at least 24 meaningful comma-separated visual tags and target approximately 90-160 words.
+The negative prompt must contain 20-35 concrete comma-separated failure tags.
+Ordinary tags must be 1-6 words and no more than 64 characters.
+Do not use sentence-like tags, prose, metaphors, narrative clauses, or explanations.
+
+Do not change the planned character, action, pose, setting, background, expression, dress, composition, lighting, camera, or framing unless the validation error explicitly requires repair of an invalid value.
+
+Every documented activation prompt must be preserved exactly as provided and must appear at least once.
+Do not paraphrase or modify activation prompts.
+Do not output LoRA implementation syntax, checkpoint names, filenames, or model names.
+
+Use the previous JSON only as the material to repair. Do not blindly append random tags just to meet minimum counts.
+
+CONTENT POLICY:
+{{DEMOGRAPHIC_POLICY}}`;
+
 const defaultPlanningPrompt = `PLANNING PHASE. Do not write image-model prompt tags yet.
 Decide the concrete visual plan that the next stage will convert into deterministic tags.
 
@@ -135,6 +208,9 @@ interface StoredGenerationSettings {
   sampler?: string;
   userPromptTemplate?: string;
   expansionPromptTemplate?: string;
+  plannerSystemPrompt?: string;
+  tagSystemPrompt?: string;
+  repairSystemPrompt?: string;
   manualLoraIds?: string[];
 }
 
@@ -618,6 +694,7 @@ function App(){
   const [manualLoraIds,setManualLoraIds]=useState<string[]>(persistedManualLoraIds);
 
   const [settingsOpen,setSettingsOpen]=useState(false);
+  const [settingsTab,setSettingsTab]=useState<'llm'|'system-prompts'|'prompt-templates'|'scene'|'output'>('llm');
   const [generationDraft,setGenerationDraft]=useState({
     llm,
     demographic,
@@ -631,6 +708,9 @@ function App(){
     steps,
     cfg,
     sampler,
+    plannerSystemPrompt:persistedGenerationSettings.plannerSystemPrompt || defaultPlannerSystemPrompt,
+    tagSystemPrompt:persistedGenerationSettings.tagSystemPrompt || defaultTagSystemPrompt,
+    repairSystemPrompt:persistedGenerationSettings.repairSystemPrompt || defaultRepairSystemPrompt,
     userPromptTemplate:persistedGenerationSettings.userPromptTemplate || defaultUserPromptTemplate,
     expansionPromptTemplate:persistedGenerationSettings.expansionPromptTemplate || defaultExpansionPromptTemplate,
   });
@@ -1032,9 +1112,21 @@ function App(){
         'ACTIVATION PROMPT(S): ' + (l.activationTags.length ? l.activationTags.join(' | ') : '(none)')
       ).join('\n\n');
 
-      // The selected demographic prompt is the complete system prompt.
-      // Planning and tag generation are separate LLM passes.
-      const selectedSystemPrompt = demographicPrompts[demographic];
+      // Each LLM stage has its own editable system prompt.
+      // The selected demographic policy is inserted into the stage prompt.
+      const selectedDemographicPolicy = demographicPrompts[demographic];
+      const plannerSystemPrompt = renderPromptTemplate(
+        generationDraft.plannerSystemPrompt,
+        {DEMOGRAPHIC_POLICY:selectedDemographicPolicy},
+      );
+      const tagSystemPrompt = renderPromptTemplate(
+        generationDraft.tagSystemPrompt,
+        {DEMOGRAPHIC_POLICY:selectedDemographicPolicy},
+      );
+      const repairSystemPrompt = renderPromptTemplate(
+        generationDraft.repairSystemPrompt,
+        {DEMOGRAPHIC_POLICY:selectedDemographicPolicy},
+      );
 
       const basePromptValues={
         CHECKPOINT:prep.checkpoint.name,
@@ -1056,7 +1148,7 @@ function App(){
       setPlanStream('');
       await streamLlm({
         settings:llm,
-        systemPrompt:selectedSystemPrompt,
+        systemPrompt:plannerSystemPrompt,
         userPrompt:renderPromptTemplate(defaultPlanningPrompt,basePromptValues),
       },event=>{
         streamText.current+=event;
@@ -1110,7 +1202,7 @@ function App(){
 
       await streamLlm({
         settings:llm,
-        systemPrompt:selectedSystemPrompt,
+        systemPrompt:tagSystemPrompt,
         userPrompt,
       },event=>{
         streamText.current+=event;
@@ -1144,7 +1236,7 @@ function App(){
 
         await streamLlm({
           settings:llm,
-          systemPrompt:selectedSystemPrompt,
+          systemPrompt:repairSystemPrompt,
           userPrompt:expansionUserPrompt,
         },event=>{
           streamText.current+=event;
@@ -1233,7 +1325,10 @@ function App(){
       const historySettings:GenerationSettings={
         llm:{...llm,apiKey:llm.apiKey ? '••••••••' : ''},
         // Keep the history record explicit about the exact system prompt that was used.
-        systemPrompt:demographicPrompts[demographic],
+        systemPrompt:tagSystemPrompt,
+        plannerSystemPrompt,
+        tagSystemPrompt,
+        repairSystemPrompt,
         demographic,
         demographicPrompts:{...demographicPrompts},
         userPromptTemplate:generationDraft.userPromptTemplate,
@@ -1654,131 +1749,165 @@ function App(){
           <button className="icon-btn" onClick={()=>setSettingsOpen(false)}><X size={16}/></button>
         </div>
 
+        <div className="settings-tabs" role="tablist" aria-label="Generation settings">
+          {([
+            ['llm','LLM'],
+            ['system-prompts','SYSTEM PROMPTS'],
+            ['prompt-templates','PROMPT TEMPLATES'],
+            ['scene','SCENE'],
+            ['output','OUTPUT'],
+          ] as const).map(([key,label])=>
+            <button
+              key={key}
+              type="button"
+              role="tab"
+              aria-selected={settingsTab===key}
+              className={'settings-tab ' + (settingsTab===key ? 'active' : '')}
+              onClick={()=>setSettingsTab(key)}
+            >
+              {label}
+            </button>
+          )}
+        </div>
+
         <div className="drawer-scroll">
-          <section className="settings-section">
-            <div className="settings-section-title">MODEL PROVIDER</div>
-            <div className="provider-toggle">
-              <button className={generationDraft.llm.provider==='ollama' ? 'active' : ''} onClick={()=>setGenerationDraft(d=>({...d,llm:{...d.llm,provider:'ollama',baseUrl:'http://127.0.0.1:11434'}}))}>OLLAMA</button>
-              <button className={generationDraft.llm.provider==='openai-compatible' ? 'active' : ''} onClick={()=>setGenerationDraft(d=>({...d,llm:{...d.llm,provider:'openai-compatible',baseUrl:'http://127.0.0.1:8080/v1'}}))}>OPENAI COMPATIBLE</button>
-            </div>
-            <div className="field-grid">
-              <label className="wide-field full-width"><span>BASE URL</span><input value={generationDraft.llm.baseUrl} onChange={e=>setGenerationDraft(d=>({...d,llm:{...d.llm,baseUrl:e.target.value}}))}/></label>
-              <label className="wide-field full-width"><span>API KEY</span><input type="password" value={generationDraft.llm.apiKey} onChange={e=>setGenerationDraft(d=>({...d,llm:{...d.llm,apiKey:e.target.value}}))}/></label>
-              <label className="wide-field full-width"><span>MODEL</span>
-                <select value={generationDraft.llm.model} onChange={e=>setGenerationDraft(d=>({...d,llm:{...d.llm,model:e.target.value}}))}>
-                  <option value="">SELECT MODEL</option>{models.map(model=><option key={model}>{model}</option>)}
-                </select>
+          {settingsTab==='llm' && <div className="settings-tab-panel">
+            <section className="settings-section settings-card">
+              <div className="settings-section-title">MODEL PROVIDER</div>
+              <div className="provider-toggle">
+                <button type="button" className={generationDraft.llm.provider==='ollama' ? 'active' : ''} onClick={()=>setGenerationDraft(d=>({...d,llm:{...d.llm,provider:'ollama',baseUrl:'http://127.0.0.1:11434'}}))}>OLLAMA</button>
+                <button type="button" className={generationDraft.llm.provider==='openai-compatible' ? 'active' : ''} onClick={()=>setGenerationDraft(d=>({...d,llm:{...d.llm,provider:'openai-compatible',baseUrl:'http://127.0.0.1:8080/v1'}}))}>OPENAI COMPATIBLE</button>
+              </div>
+              <div className="settings-form-grid">
+                <label className="settings-field settings-field-full"><span>BASE URL</span><input value={generationDraft.llm.baseUrl} onChange={e=>setGenerationDraft(d=>({...d,llm:{...d.llm,baseUrl:e.target.value}}))}/></label>
+                <label className="settings-field settings-field-full"><span>API KEY</span><input type="password" value={generationDraft.llm.apiKey} onChange={e=>setGenerationDraft(d=>({...d,llm:{...d.llm,apiKey:e.target.value}}))}/></label>
+                <label className="settings-field settings-field-full"><span>MODEL</span>
+                  <select value={generationDraft.llm.model} onChange={e=>setGenerationDraft(d=>({...d,llm:{...d.llm,model:e.target.value}}))}>
+                    <option value="">SELECT MODEL</option>{models.map(model=><option key={model}>{model}</option>)}
+                  </select>
+                </label>
+                <button type="button" className="secondary-btn full settings-field-full" onClick={()=>void (async()=>{
+                  try{
+                    const found=await fetchModels(generationDraft.llm);
+                    setGenerationDraft(d=>({...d,llm:{...d.llm,model:d.llm.model || found[0] || ''}}));
+                  }catch(e){setError(String(e));}
+                })()}><RefreshCw size={13}/> GET MODELS</button>
+                <label className="settings-field"><span>TEMPERATURE <b>{generationDraft.llm.temperature.toFixed(2)}</b></span><input type="range" min={0} max={2} step={0.05} value={generationDraft.llm.temperature} onChange={e=>setGenerationDraft(d=>({...d,llm:{...d.llm,temperature:Number(e.target.value)}}))}/></label>
+                <label className="settings-field"><span>MAX TOKENS</span><input type="number" min={128} max={16384} value={generationDraft.llm.maxTokens} onChange={e=>setGenerationDraft(d=>({...d,llm:{...d.llm,maxTokens:Math.max(128,Number(e.target.value))}}))}/></label>
+                <label className="settings-field settings-field-full"><span>CONTEXT TOKENS</span><input type="number" min={2048} max={131072} step={1024} value={generationDraft.llm.contextTokens} onChange={e=>setGenerationDraft(d=>({...d,llm:{...d.llm,contextTokens:Math.max(2048,Number(e.target.value))}}))}/></label>
+              </div>
+            </section>
+          </div>}
+
+          {settingsTab==='system-prompts' && <div className="settings-tab-panel">
+            <section className="settings-section settings-card">
+              <div className="settings-section-title">ACTIVE CONTENT POLICY</div>
+              <div className="settings-helper">The selected policy is inserted into all three stage system prompts at the CONTENT POLICY section. The policy text itself is editable.</div>
+              <div className="demographic-grid settings-policy-grid">
+                {(['safe','suggestive','explicit','no-limits'] as DemographicLevel[]).map(level=>
+                  <button type="button" key={level} className={'demographic-card ' + (generationDraft.demographic===level ? 'active' : '')} onClick={()=>setGenerationDraft(d=>({...d,demographic:level}))}>
+                    <b>{level.replace('-',' ').toUpperCase()}</b>
+                    <span>{level==='safe' ? 'General audience' : level==='suggestive' ? 'Mature / suggestive' : level==='explicit' ? 'Adult explicit' : 'No added restriction'}</span>
+                  </button>
+                )}
+              </div>
+              <label className="settings-field settings-field-full">
+                <span>{generationDraft.demographic.replace('-',' ').toUpperCase()} CONTENT POLICY</span>
+                <textarea className="settings-textarea" value={generationDraft.demographicPrompts[generationDraft.demographic]} onChange={e=>setGenerationDraft(d=>({...d,demographicPrompts:{...d.demographicPrompts,[d.demographic]:e.target.value}}))}/>
               </label>
-              <button className="secondary-btn full" onClick={()=>void (async()=>{
-                try{
-                  const found=await fetchModels(generationDraft.llm);
-                  setGenerationDraft(d=>({...d,llm:{...d.llm,model:d.llm.model || found[0] || ''}}));
-                }catch(e){setError(String(e));}
-              })()}><RefreshCw size={13}/> GET MODELS</button>
-              <label className="wide-field"><span>TEMPERATURE · {generationDraft.llm.temperature.toFixed(2)}</span><input type="range" min={0} max={2} step={0.05} value={generationDraft.llm.temperature} onChange={e=>setGenerationDraft(d=>({...d,llm:{...d.llm,temperature:Number(e.target.value)}}))}/></label>
-              <label className="wide-field"><span>MAX TOKENS</span><input type="number" min={128} max={16384} value={generationDraft.llm.maxTokens} onChange={e=>setGenerationDraft(d=>({...d,llm:{...d.llm,maxTokens:Math.max(128,Number(e.target.value))}}))}/></label>
-              <label className="wide-field"><span>CONTEXT TOKENS</span><input type="number" min={2048} max={131072} step={1024} value={generationDraft.llm.contextTokens} onChange={e=>setGenerationDraft(d=>({...d,llm:{...d.llm,contextTokens:Math.max(2048,Number(e.target.value))}}))}/></label>
-            </div>
-          </section>
+            </section>
 
-          <section className="settings-section">
-            <div className="settings-section-title">DEMOGRAPHIC POLICY</div>
-            <div className="demographic-grid">
-              {(['safe','suggestive','explicit','no-limits'] as DemographicLevel[]).map(level=>
-                <button key={level} className={'demographic-card ' + (generationDraft.demographic===level ? 'active' : '')} onClick={()=>setGenerationDraft(d=>({...d,demographic:level}))}>
-                  <b>{level.replace('-',' ').toUpperCase()}</b><span>{level==='safe' ? 'General audience' : level==='suggestive' ? 'Mature / suggestive' : level==='explicit' ? 'Adult explicit' : 'No added restriction'}</span>
-                </button>
-              )}
-            </div>
-            <div className="policy-editor-list">
-              {(['safe','suggestive','explicit','no-limits'] as DemographicLevel[]).map(level=>
-                <label className="wide-field" key={level}>
-                  <span>{level.replace('-',' ').toUpperCase()} SYSTEM PROMPT · SENT EXACTLY TO LLM</span>
-                  <textarea className="settings-textarea" value={generationDraft.demographicPrompts[level]} onChange={e=>setGenerationDraft(d=>({...d,demographicPrompts:{...d.demographicPrompts,[level]:e.target.value}}))}/>
+            {([
+              ['plannerSystemPrompt','PLANNER SYSTEM PROMPT','Plans the concrete visual decisions before tag generation.'],
+              ['tagSystemPrompt','TAG GENERATION SYSTEM PROMPT','Converts the locked plan into the first final positive/negative tag pair.'],
+              ['repairSystemPrompt','TAG REPAIR SYSTEM PROMPT','Repairs a failed tag pair using validation errors and the previous JSON.'],
+            ] as const).map(([key,title,help])=>
+              <section className="settings-section settings-card settings-stage-card" key={key}>
+                <div className="settings-stage-head">
+                  <div>
+                    <div className="settings-section-title">{title}</div>
+                    <div className="settings-helper">{help}</div>
+                  </div>
+                  <span className="settings-stage-badge">EDITABLE</span>
+                </div>
+                <label className="settings-field settings-field-full">
+                  <span>SYSTEM PROMPT TEMPLATE</span>
+                  <textarea className="settings-textarea system-prompt-editor" value={generationDraft[key]} onChange={e=>setGenerationDraft(d=>({...d,[key]:e.target.value}))}/>
                 </label>
-              )}
-            </div>
-          </section>
-
-          <section className="settings-section">
-            <div className="settings-section-title">EFFECTIVE SYSTEM PROMPTS</div>
-            <div className="field-help">
-              These are the exact system prompts currently sent to the selected LLM for each phase.
-              Both phases use the selected demographic system prompt; their user prompts are different.
-            </div>
-            <label className="wide-field">
-              <span>PLANNER SYSTEM PROMPT · SENT EXACTLY TO PLANNER MODEL</span>
-              <textarea
-                className="settings-textarea prompt-template-editor"
-                value={generationDraft.demographicPrompts[generationDraft.demographic]}
-                readOnly
-              />
-            </label>
-            <label className="wide-field">
-              <span>TAG-REPAIR SYSTEM PROMPT · SENT EXACTLY WHEN TAG VALIDATION FAILS</span>
-              <textarea
-                className="settings-textarea prompt-template-editor"
-                value={generationDraft.demographicPrompts[generationDraft.demographic]}
-                readOnly
-              />
-            </label>
-          </section>
-
-          <section className="settings-section">
-            <div className="settings-section-title">LLM USER PROMPTS</div>
-            <label className="wide-field">
-              <span>PRIMARY USER PROMPT · EDITABLE</span>
-              <textarea
-                className="settings-textarea prompt-template-editor"
-                value={generationDraft.userPromptTemplate}
-                onChange={e=>setGenerationDraft(d=>({...d,userPromptTemplate:e.target.value}))}
-              />
-            </label>
-            <div className="field-help">{'Placeholders: {{CHECKPOINT}}, {{BASE}}, {{COMPATIBILITY}}, {{LORA_METADATA}}, {{CHARACTER}}, {{SETTING}}, {{POSE}}, {{EXPRESSION}}, {{DRESS}}, {{COMPOSITION}}, {{EXTRA}}'}</div>
-            <label className="wide-field">
-              <span>EXPANSION USER PROMPT · EDITABLE</span>
-              <textarea
-                className="settings-textarea prompt-template-editor"
-                value={generationDraft.expansionPromptTemplate}
-                onChange={e=>setGenerationDraft(d=>({...d,expansionPromptTemplate:e.target.value}))}
-              />
-            </label>
-            <div className="field-help">{'The expansion pass is only sent when the first result needs expansion. Additional placeholder: {{PREVIOUS_JSON}}'}</div>
-          </section>
-
-          <section className="settings-section">
-            <div className="settings-section-title">SCENE</div>
-            <div className="field-grid">
-              {(['setting','pose','expression','character','dress','composition','additional'] as const).map(key=>
-                <label className={'wide-field ' + (key==='additional' ? 'full-width' : '')} key={key}>
-                  <span>{key.replace('_',' ').toUpperCase()}</span>
-                  {key==='additional'
-                    ? <textarea className="settings-textarea" value={generationDraft.constraints[key]} onChange={e=>setGenerationDraft(d=>({...d,constraints:{...d.constraints,[key]:e.target.value}}))} placeholder="Additional prompt constraints"/>
-                    : <input value={generationDraft.constraints[key]} onChange={e=>setGenerationDraft(d=>({...d,constraints:{...d.constraints,[key]:e.target.value}}))} placeholder={key==='character' ? 'Compatible character LoRA' : 'Random if blank'}/>}
+                <div className="settings-helper">Placeholder: {{DEMOGRAPHIC_POLICY}}</div>
+                <label className="settings-field settings-field-full">
+                  <span>EFFECTIVE SYSTEM PROMPT · SENT TO MODEL</span>
+                  <textarea
+                    className="settings-textarea system-prompt-preview"
+                    value={renderPromptTemplate(generationDraft[key],{DEMOGRAPHIC_POLICY:generationDraft.demographicPrompts[generationDraft.demographic]})}
+                    readOnly
+                  />
                 </label>
-              )}
-            </div>
-          </section>
+              </section>
+            )}
+          </div>}
 
-          <section className="settings-section">
-            <div className="settings-section-title">LORA LIMITS</div>
-            <div className="field-grid">
-              <label className="wide-field"><span>MAX LoRAs</span><input type="number" min={1} max={16} value={generationDraft.maxLoras} onChange={e=>setGenerationDraft(d=>({...d,maxLoras:Math.max(1,Number(e.target.value))}))}/></label>
-              <label className="wide-field"><span>RANDOM MIN</span><input type="number" min={1} max={16} value={generationDraft.randomLoraMin} onChange={e=>setGenerationDraft(d=>({...d,randomLoraMin:Math.max(1,Number(e.target.value))}))}/></label>
-              <label className="wide-field"><span>RANDOM MAX</span><input type="number" min={1} max={16} value={generationDraft.randomLoraMax} onChange={e=>setGenerationDraft(d=>({...d,randomLoraMax:Math.max(1,Number(e.target.value))}))}/></label>
-            </div>
-          </section>
+          {settingsTab==='prompt-templates' && <div className="settings-tab-panel">
+            <section className="settings-section settings-card">
+              <div className="settings-section-title">TAG GENERATION USER PROMPT</div>
+              <div className="settings-helper">This is the user message sent with the tag-generation system prompt. Checkpoint, compatibility and LoRA data are inserted at generation time.</div>
+              <label className="settings-field settings-field-full">
+                <span>PRIMARY USER PROMPT TEMPLATE · EDITABLE</span>
+                <textarea className="settings-textarea prompt-template-editor" value={generationDraft.userPromptTemplate} onChange={e=>setGenerationDraft(d=>({...d,userPromptTemplate:e.target.value}))}/>
+              </label>
+              <div className="settings-helper">Placeholders: {{CHECKPOINT}}, {{BASE}}, {{COMPATIBILITY}}, {{LORA_METADATA}}, {{CHARACTER}}, {{SETTING}}, {{POSE}}, {{EXPRESSION}}, {{DRESS}}, {{COMPOSITION}}, {{EXTRA}}</div>
+            </section>
 
-          <section className="settings-section">
-            <div className="settings-section-title">SAMPLING</div>
-            <div className="field-grid">
-              <label className="wide-field"><span>WIDTH</span><input type="number" min={64} step={64} value={generationDraft.width} onChange={e=>setGenerationDraft(d=>({...d,width:Number(e.target.value)}))}/></label>
-              <label className="wide-field"><span>HEIGHT</span><input type="number" min={64} step={64} value={generationDraft.height} onChange={e=>setGenerationDraft(d=>({...d,height:Number(e.target.value)}))}/></label>
-              <label className="wide-field"><span>STEPS</span><input type="number" min={1} max={200} value={generationDraft.steps} onChange={e=>setGenerationDraft(d=>({...d,steps:Number(e.target.value)}))}/></label>
-              <label className="wide-field"><span>CFG</span><input type="number" min={0} step={0.1} value={generationDraft.cfg} onChange={e=>setGenerationDraft(d=>({...d,cfg:Number(e.target.value)}))}/></label>
-              <label className="wide-field full-width"><span>SAMPLER</span><input value={generationDraft.sampler} onChange={e=>setGenerationDraft(d=>({...d,sampler:e.target.value}))}/></label>
-            </div>
-          </section>
+            <section className="settings-section settings-card">
+              <div className="settings-section-title">TAG REPAIR USER PROMPT</div>
+              <div className="settings-helper">This is the user message sent only when validation fails. The app appends the actual validation errors and previous JSON after this template.</div>
+              <label className="settings-field settings-field-full">
+                <span>REPAIR USER PROMPT TEMPLATE · EDITABLE</span>
+                <textarea className="settings-textarea prompt-template-editor" value={generationDraft.expansionPromptTemplate} onChange={e=>setGenerationDraft(d=>({...d,expansionPromptTemplate:e.target.value}))}/>
+              </label>
+              <div className="settings-helper">Placeholder: {{PREVIOUS_JSON}} plus the same scene/model placeholders as the primary template.</div>
+            </section>
+          </div>}
+
+          {settingsTab==='scene' && <div className="settings-tab-panel">
+            <section className="settings-section settings-card">
+              <div className="settings-section-title">SCENE CONSTRAINTS</div>
+              <div className="settings-form-grid">
+                {(['setting','pose','expression','character','dress','composition'] as const).map(key=>
+                  <label className="settings-field" key={key}>
+                    <span>{key.replace('_',' ').toUpperCase()}</span>
+                    <input value={generationDraft.constraints[key]} onChange={e=>setGenerationDraft(d=>({...d,constraints:{...d.constraints,[key]:e.target.value}}))} placeholder={key==='character' ? 'Compatible character LoRA' : 'Random if blank'}/>
+                  </label>
+                )}
+                <label className="settings-field settings-field-full">
+                  <span>ADDITIONAL CONSTRAINTS</span>
+                  <textarea className="settings-textarea" value={generationDraft.constraints.additional} onChange={e=>setGenerationDraft(d=>({...d,constraints:{...d.constraints,additional:e.target.value}}))} placeholder="Additional visual constraints"/>
+                </label>
+              </div>
+            </section>
+          </div>}
+
+          {settingsTab==='output' && <div className="settings-tab-panel">
+            <section className="settings-section settings-card">
+              <div className="settings-section-title">LoRA SELECTION LIMITS</div>
+              <div className="settings-form-grid">
+                <label className="settings-field"><span>MAX LoRAs</span><input type="number" min={1} max={16} value={generationDraft.maxLoras} onChange={e=>setGenerationDraft(d=>({...d,maxLoras:Math.max(1,Number(e.target.value))}))}/></label>
+                <label className="settings-field"><span>RANDOM MIN</span><input type="number" min={1} max={16} value={generationDraft.randomLoraMin} onChange={e=>setGenerationDraft(d=>({...d,randomLoraMin:Math.max(1,Number(e.target.value))}))}/></label>
+                <label className="settings-field"><span>RANDOM MAX</span><input type="number" min={1} max={16} value={generationDraft.randomLoraMax} onChange={e=>setGenerationDraft(d=>({...d,randomLoraMax:Math.max(1,Number(e.target.value))}))}/></label>
+              </div>
+            </section>
+
+            <section className="settings-section settings-card">
+              <div className="settings-section-title">IMAGE SAMPLING</div>
+              <div className="settings-form-grid">
+                <label className="settings-field"><span>WIDTH</span><input type="number" min={64} step={64} value={generationDraft.width} onChange={e=>setGenerationDraft(d=>({...d,width:Number(e.target.value)}))}/></label>
+                <label className="settings-field"><span>HEIGHT</span><input type="number" min={64} step={64} value={generationDraft.height} onChange={e=>setGenerationDraft(d=>({...d,height:Number(e.target.value)}))}/></label>
+                <label className="settings-field"><span>STEPS</span><input type="number" min={1} max={200} value={generationDraft.steps} onChange={e=>setGenerationDraft(d=>({...d,steps:Number(e.target.value)}))}/></label>
+                <label className="settings-field"><span>CFG</span><input type="number" min={0} step={0.1} value={generationDraft.cfg} onChange={e=>setGenerationDraft(d=>({...d,cfg:Number(e.target.value)}))}/></label>
+                <label className="settings-field settings-field-full"><span>SAMPLER</span><input value={generationDraft.sampler} onChange={e=>setGenerationDraft(d=>({...d,sampler:e.target.value}))}/></label>
+              </div>
+            </section>
+          </div>}
         </div>
 
         <div className="drawer-foot">
