@@ -251,20 +251,18 @@ function loadPersistedGenerationSettings(): StoredGenerationSettings {
         : defaultRepairSystemPrompt;
 
     if(typeof migrated.tagSystemPrompt==='string'
-      && migrated.tagSystemPrompt.includes('You are the TAG GENERATION MODEL')
-      && !migrated.tagSystemPrompt.includes('{{MIN_POSITIVE_TAGS}}')){
+      && migrated.tagSystemPrompt.includes('You are the TAG GENERATION MODEL')){
       migrated.tagSystemPrompt=migrated.tagSystemPrompt
         .replace(/at least 24 meaningful/gi,'at least {{MIN_POSITIVE_TAGS}} meaningful')
         .replace(/20-35 concrete/gi,'between {{MIN_NEGATIVE_TAGS}} and {{MAX_NEGATIVE_TAGS}} concrete')
-        .replace(/between \\{\\{MIN_NEGATIVE_TAGS\\}\\} and 35 concrete/gi,'between {{MIN_NEGATIVE_TAGS}} and {{MAX_NEGATIVE_TAGS}} concrete');
+        .replace(/between \{\{MIN_NEGATIVE_TAGS\}\} and 35 concrete/gi,'between {{MIN_NEGATIVE_TAGS}} and {{MAX_NEGATIVE_TAGS}} concrete');
     }
     if(typeof migrated.repairSystemPrompt==='string'
-      && migrated.repairSystemPrompt.includes('You are the TAG REPAIRER')
-      && !migrated.repairSystemPrompt.includes('{{MIN_POSITIVE_TAGS}}')){
+      && migrated.repairSystemPrompt.includes('You are the TAG REPAIRER')){
       migrated.repairSystemPrompt=migrated.repairSystemPrompt
         .replace(/at least 24 meaningful/gi,'at least {{MIN_POSITIVE_TAGS}} meaningful')
         .replace(/20-35 concrete/gi,'between {{MIN_NEGATIVE_TAGS}} and {{MAX_NEGATIVE_TAGS}} concrete')
-        .replace(/between \\{\\{MIN_NEGATIVE_TAGS\\}\\} and 35 concrete/gi,'between {{MIN_NEGATIVE_TAGS}} and {{MAX_NEGATIVE_TAGS}} concrete');
+        .replace(/between \{\{MIN_NEGATIVE_TAGS\}\} and 35 concrete/gi,'between {{MIN_NEGATIVE_TAGS}} and {{MAX_NEGATIVE_TAGS}} concrete');
     }
 
     migrated.maxNegativeTags=Math.max(1,Math.min(absoluteMaxTagLimit,migrated.maxNegativeTags ?? defaultMaxNegativeTags));
