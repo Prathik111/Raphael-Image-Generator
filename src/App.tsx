@@ -91,7 +91,7 @@ Do not invent a different pose, action, background, expression, lighting, camera
 
 Cover the subject identity and visible appearance, current action/state, pose, hands and arms when relevant, head direction, gaze, facial expression, clothing and accessories, interaction, setting, background, atmosphere, composition, perspective, depth, lighting, camera viewpoint, framing, materials, and useful finishing details.
 
-The negative prompt must contain between {{MIN_NEGATIVE_TAGS}} and 35 concrete comma-separated failure tags targeted to the image.
+The negative prompt must contain between {{MIN_NEGATIVE_TAGS}} and {{MAX_NEGATIVE_TAGS}} concrete comma-separated failure tags targeted to the image.
 Do not mention checkpoint names, filenames, model implementation syntax, or LoRA syntax.
 
 Every documented activation prompt supplied in the user message must be preserved exactly, unchanged, at least once, and placed next to the visual concept it controls.
@@ -112,7 +112,7 @@ Return JSON only:
 
 Fix every validation problem explicitly reported in the user message.
 The positive prompt must contain at least {{MIN_POSITIVE_TAGS}} meaningful comma-separated visual tags and target approximately 90-160 words.
-The negative prompt must contain between {{MIN_NEGATIVE_TAGS}} and 35 concrete comma-separated failure tags.
+The negative prompt must contain between {{MIN_NEGATIVE_TAGS}} and {{MAX_NEGATIVE_TAGS}} concrete comma-separated failure tags.
 Ordinary tags must be 1-6 words and no more than 64 characters.
 Do not use sentence-like tags, prose, metaphors, narrative clauses, or explanations.
 
@@ -189,7 +189,8 @@ PREVIOUS JSON:
 const generationSettingsStorageKey = 'raphael-image-generator.generation-settings.v2';
 const defaultMinPositiveTags = 24;
 const defaultMinNegativeTags = 20;
-const maxNegativeTags = 35;
+const defaultMaxNegativeTags = 35;
+const absoluteMaxTagLimit = 100;
 
 interface StoredGenerationSettings {
   llm?: LlmSettings;
@@ -211,6 +212,7 @@ interface StoredGenerationSettings {
   repairSystemPrompt?: string;
   minPositiveTags?: number;
   minNegativeTags?: number;
+  maxNegativeTags?: number;
   manualLoraIds?: string[];
 }
 
@@ -253,18 +255,21 @@ function loadPersistedGenerationSettings(): StoredGenerationSettings {
       && !migrated.tagSystemPrompt.includes('{{MIN_POSITIVE_TAGS}}')){
       migrated.tagSystemPrompt=migrated.tagSystemPrompt
         .replace(/at least 24 meaningful/gi,'at least {{MIN_POSITIVE_TAGS}} meaningful')
-        .replace(/20-35 concrete/gi,'between {{MIN_NEGATIVE_TAGS}} and 35 concrete');
+        .replace(/20-35 concrete/gi,'between {{MIN_NEGATIVE_TAGS}} and {{MAX_NEGATIVE_TAGS}} concrete')
+        .replace(/between \\{\\{MIN_NEGATIVE_TAGS\\}\\} and 35 concrete/gi,'between {{MIN_NEGATIVE_TAGS}} and {{MAX_NEGATIVE_TAGS}} concrete');
     }
     if(typeof migrated.repairSystemPrompt==='string'
       && migrated.repairSystemPrompt.includes('You are the TAG REPAIRER')
       && !migrated.repairSystemPrompt.includes('{{MIN_POSITIVE_TAGS}}')){
       migrated.repairSystemPrompt=migrated.repairSystemPrompt
         .replace(/at least 24 meaningful/gi,'at least {{MIN_POSITIVE_TAGS}} meaningful')
-        .replace(/20-35 concrete/gi,'between {{MIN_NEGATIVE_TAGS}} and 35 concrete');
+        .replace(/20-35 concrete/gi,'between {{MIN_NEGATIVE_TAGS}} and {{MAX_NEGATIVE_TAGS}} concrete')
+        .replace(/between \\{\\{MIN_NEGATIVE_TAGS\\}\\} and 35 concrete/gi,'between {{MIN_NEGATIVE_TAGS}} and {{MAX_NEGATIVE_TAGS}} concrete');
     }
 
+    migrated.maxNegativeTags=Math.max(1,Math.min(absoluteMaxTagLimit,migrated.maxNegativeTags ?? defaultMaxNegativeTags));
     migrated.minPositiveTags=Math.max(1,Math.min(100,migrated.minPositiveTags ?? defaultMinPositiveTags));
-    migrated.minNegativeTags=Math.max(1,Math.min(maxNegativeTags,migrated.minNegativeTags ?? defaultMinNegativeTags));
+    migrated.minNegativeTags=Math.max(1,Math.min(migrated.maxNegativeTags,migrated.minNegativeTags ?? defaultMinNegativeTags));
 
     return migrated;
   }catch{
@@ -521,6 +526,7 @@ function validateGeneratedPrompt(
   activationTags:string[],
   minPositiveTags:number,
   minNegativeTags:number,
+  maxNegativeTags:number,
 ):PromptValidation{
   const positiveTags=splitPromptTags(pair.positive_prompt);
   const negativeTags=splitPromptTags(pair.negative_prompt);
@@ -724,7 +730,10 @@ function App(){
     Math.max(1,Math.min(100,persistedGenerationSettings.minPositiveTags ?? defaultMinPositiveTags)),
   );
   const [minNegativeTags,setMinNegativeTags]=useState(
-    Math.max(1,Math.min(maxNegativeTags,persistedGenerationSettings.minNegativeTags ?? defaultMinNegativeTags)),
+    Math.max(1,Math.min(persistedGenerationSettings.maxNegativeTags ?? defaultMaxNegativeTags,persistedGenerationSettings.minNegativeTags ?? defaultMinNegativeTags)),
+  );
+  const [maxNegativeTags,setMaxNegativeTags]=useState(
+    Math.max(1,Math.min(absoluteMaxTagLimit,persistedGenerationSettings.maxNegativeTags ?? defaultMaxNegativeTags)),
   );
 
   const [prepared,setPrepared]=useState<PreparedGeneration|null>(null);
@@ -771,7 +780,8 @@ function App(){
     userPromptTemplate:persistedGenerationSettings.userPromptTemplate || defaultUserPromptTemplate,
     expansionPromptTemplate:persistedGenerationSettings.expansionPromptTemplate || defaultExpansionPromptTemplate,
     minPositiveTags:Math.max(1,Math.min(100,persistedGenerationSettings.minPositiveTags ?? defaultMinPositiveTags)),
-    minNegativeTags:Math.max(1,Math.min(maxNegativeTags,persistedGenerationSettings.minNegativeTags ?? defaultMinNegativeTags)),
+    minNegativeTags:Math.max(1,Math.min(persistedGenerationSettings.maxNegativeTags ?? defaultMaxNegativeTags,persistedGenerationSettings.minNegativeTags ?? defaultMinNegativeTags)),
+    maxNegativeTags:Math.max(1,Math.min(absoluteMaxTagLimit,persistedGenerationSettings.maxNegativeTags ?? defaultMaxNegativeTags)),
   });
   const [selectedHistoryId,setSelectedHistoryId]=useState('');
   const [historySettingsVisible,setHistorySettingsVisible]=useState(false);
@@ -962,8 +972,9 @@ function App(){
     const normalizedDraft={
       ...draft,
       maxLoras:cappedMax,
+      maxNegativeTags:Math.max(1,Math.min(absoluteMaxTagLimit,Number(draft.maxNegativeTags) || defaultMaxNegativeTags)),
       minPositiveTags:Math.max(1,Math.min(100,Number(draft.minPositiveTags) || defaultMinPositiveTags)),
-      minNegativeTags:Math.max(1,Math.min(maxNegativeTags,Number(draft.minNegativeTags) || defaultMinNegativeTags)),
+      minNegativeTags:Math.max(1,Math.min(Math.max(1,Math.min(absoluteMaxTagLimit,Number(draft.maxNegativeTags) || defaultMaxNegativeTags)),Number(draft.minNegativeTags) || defaultMinNegativeTags)),
       randomLoraMin:nextConstraints.randomLoraMin,
       randomLoraMax:nextConstraints.randomLoraMax,
       constraints:nextConstraints,
@@ -985,6 +996,7 @@ function App(){
     setCfg(normalizedDraft.cfg);
     setSampler(normalizedDraft.sampler);
     setMinPositiveTags(normalizedDraft.minPositiveTags);
+    setMaxNegativeTags(normalizedDraft.maxNegativeTags);
     setMinNegativeTags(normalizedDraft.minNegativeTags);
     try{
       window.localStorage.setItem(
@@ -1182,6 +1194,7 @@ function App(){
         DEMOGRAPHIC_POLICY:selectedDemographicPolicy,
         MIN_POSITIVE_TAGS:String(generationDraft.minPositiveTags),
         MIN_NEGATIVE_TAGS:String(generationDraft.minNegativeTags),
+        MAX_NEGATIVE_TAGS:String(generationDraft.maxNegativeTags),
       };
       const plannerSystemPrompt = renderPromptTemplate(
         generationDraft.plannerSystemPrompt,
@@ -1283,6 +1296,7 @@ function App(){
         prep.loras.flatMap(l=>l.activationTags),
         generationDraft.minPositiveTags,
         generationDraft.minNegativeTags,
+        generationDraft.maxNegativeTags,
       );
       let validationAttempt=0;
 
@@ -1305,7 +1319,7 @@ function App(){
         )+
         '\n\nSTRICT VALIDATION FAILURE. REDO THE OUTPUT NOW.\n'+
         deficiency.map(item=>'- '+item).join('\n')+
-        '\nRules: at least '+generationDraft.minPositiveTags+' positive comma-separated tags, between '+generationDraft.minNegativeTags+' and '+maxNegativeTags+' negative tags, ordinary tags must be 1-6 words and <=64 characters, no sentence-like tags, no prose, no metaphors, no narrative clauses. Preserve every documented activation prompt exactly. Return JSON only.';
+        '\nRules: at least '+generationDraft.minPositiveTags+' positive comma-separated tags, between '+generationDraft.minNegativeTags+' and '+generationDraft.maxNegativeTags+' negative tags, ordinary tags must be 1-6 words and <=64 characters, no sentence-like tags, no prose, no metaphors, no narrative clauses. Preserve every documented activation prompt exactly. Return JSON only.';
 
         await streamLlm({
           settings:llm,
@@ -1322,6 +1336,7 @@ function App(){
           prep.loras.flatMap(l=>l.activationTags),
           generationDraft.minPositiveTags,
           generationDraft.minNegativeTags,
+          generationDraft.maxNegativeTags,
         );
       }
 
@@ -1422,6 +1437,7 @@ function App(){
         sampler,
         minPositiveTags:generationDraft.minPositiveTags,
         minNegativeTags:generationDraft.minNegativeTags,
+        maxNegativeTags:generationDraft.maxNegativeTags,
       };
       const record:GenerationRecord={
         id:crypto.randomUUID(),
@@ -1918,7 +1934,7 @@ function App(){
                   <span>SYSTEM PROMPT TEMPLATE</span>
                   <textarea className="settings-textarea system-prompt-editor" value={generationDraft[key]} onChange={e=>setGenerationDraft(d=>({...d,[key]:e.target.value}))}/>
                 </label>
-                <div className="settings-helper">{'Placeholders: {{DEMOGRAPHIC_POLICY}}, {{MIN_POSITIVE_TAGS}}, {{MIN_NEGATIVE_TAGS}}'}</div>
+                <div className="settings-helper">{'Placeholders: {{DEMOGRAPHIC_POLICY}}, {{MIN_POSITIVE_TAGS}}, {{MIN_NEGATIVE_TAGS}}, {{MAX_NEGATIVE_TAGS}}'}</div>
                 <label className="settings-field settings-field-full">
                   <span>EFFECTIVE SYSTEM PROMPT · SENT TO MODEL</span>
                   <textarea
@@ -1927,6 +1943,7 @@ function App(){
                       DEMOGRAPHIC_POLICY:generationDraft.demographicPrompts[generationDraft.demographic],
                       MIN_POSITIVE_TAGS:String(generationDraft.minPositiveTags),
                       MIN_NEGATIVE_TAGS:String(generationDraft.minNegativeTags),
+                      MAX_NEGATIVE_TAGS:String(generationDraft.maxNegativeTags),
                     })}
                     readOnly
                   />
@@ -1978,7 +1995,7 @@ function App(){
           {settingsTab==='output' && <div className="settings-tab-panel">
             <section className="settings-section settings-card">
               <div className="settings-section-title">TAG VALIDATION</div>
-              <div className="settings-helper">Minimum comma-separated tags required before a prompt can be sent to ComfyUI. Negative tags have a fixed maximum of {maxNegativeTags}.</div>
+              <div className="settings-helper">Configure the minimum and maximum comma-separated negative tags required by validation. The maximum can be set from 1 to {absoluteMaxTagLimit}.</div>
               <div className="settings-form-grid">
                 <label className="settings-field settings-number-field">
                   <span>MINIMUM POSITIVE TAGS</span>
@@ -1997,12 +2014,27 @@ function App(){
                   <input
                     type="number"
                     min={1}
-                    max={maxNegativeTags}
+                    max={generationDraft.maxNegativeTags}
                     step={1}
                     value={generationDraft.minNegativeTags}
-                    onChange={e=>setGenerationDraft(d=>({...d,minNegativeTags:Math.max(1,Math.min(maxNegativeTags,Number(e.target.value)||1))}))}
+                    onChange={e=>setGenerationDraft(d=>({...d,minNegativeTags:Math.max(1,Math.min(d.maxNegativeTags,Number(e.target.value)||1))}))}
                   />
-                  <small>Default: {defaultMinNegativeTags} · maximum: {maxNegativeTags}</small>
+                  <small>Default: {defaultMinNegativeTags} · must not exceed maximum</small>
+                </label>
+                <label className="settings-field settings-number-field">
+                  <span>MAXIMUM NEGATIVE TAGS</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={absoluteMaxTagLimit}
+                    step={1}
+                    value={generationDraft.maxNegativeTags}
+                    onChange={e=>{
+                      const next=Math.max(1,Math.min(absoluteMaxTagLimit,Number(e.target.value)||1));
+                      setGenerationDraft(d=>({...d,maxNegativeTags:next,minNegativeTags:Math.min(d.minNegativeTags,next)}));
+                    }}
+                  />
+                  <small>Default: {defaultMaxNegativeTags} · absolute maximum: {absoluteMaxTagLimit}</small>
                 </label>
               </div>
             </section>
