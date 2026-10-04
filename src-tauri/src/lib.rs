@@ -1830,18 +1830,12 @@ mod tests {
 
     #[test]
     fn finalize_prompt_strips_generated_lora_syntax() {
-        let loras=vec![SelectedLora{
-            id:"x".into(), name:"Style".into(), path:"x".into(), weight:1.0,
-            activation_tags:vec!["style_trigger".into()], tags:vec![],
-            description:None, character:false, base_model:None,
-        }];
         let result=finalize_positive_prompt(
             "anime character, [Style - Nekoya@4x0style]1.3, <lora:foo:1.2>, detailed face",
-            &loras,
         );
         assert!(!result.contains("[Style - Nekoya@4x0style]1.3"));
         assert!(!result.contains("<lora:foo:1.2>"));
-        assert!(result.contains("style_trigger"));
+        assert!(result.contains("anime character"));
         assert!(result.contains("detailed face"));
     }
 
