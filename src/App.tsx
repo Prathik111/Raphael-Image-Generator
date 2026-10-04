@@ -772,6 +772,7 @@ function App(){
   const [manualLoraIds,setManualLoraIds]=useState<string[]>(persistedManualLoraIds);
 
   const [settingsOpen,setSettingsOpen]=useState(false);
+  const [mobileControlsOpen,setMobileControlsOpen]=useState(false);
   const [settingsTab,setSettingsTab]=useState<'llm'|'system-prompts'|'prompt-templates'|'scene'|'output'>('llm');
   const [generationDraft,setGenerationDraft]=useState({
     llm,
@@ -1613,6 +1614,7 @@ function App(){
   }
 
   function selectCheckpoint(id:string){
+    setMobileControlsOpen(false);
     setSelectedId(id);
     setPrepared(null);
     setPrompts(null);
@@ -1622,8 +1624,24 @@ function App(){
   }
 
   async function copy(text:string){
-    await navigator.clipboard?.writeText(text);
-    setToast('Copied');
+    try{
+      if(navigator.clipboard?.writeText){
+        await navigator.clipboard.writeText(text);
+      }else{
+        const helper=document.createElement('textarea');
+        helper.value=text;
+        helper.style.position='fixed';
+        helper.style.opacity='0';
+        document.body.appendChild(helper);
+        helper.focus();
+        helper.select();
+        document.execCommand('copy');
+        helper.remove();
+      }
+      setToast('Copied');
+    }catch{
+      setToast('Copy unavailable — long-press the address to copy it.');
+    }
   }
 
   async function startLanHost(){
@@ -1673,6 +1691,17 @@ function App(){
             <Globe2 size={13}/> {webHost ? 'WEB HOST ON' : 'WEB HOST'}
           </button>
         )}
+        <div className="mobile-actions">
+          <button type="button" className={mobileControlsOpen ? 'active' : ''} onClick={()=>setMobileControlsOpen(v=>!v)} title="Open model and backend controls">
+            <Layers3 size={13}/> MODELS
+          </button>
+          <button type="button" className={tab==='history' ? 'active' : ''} onClick={()=>{setTab('history');setSettingsOpen(false);setMobileControlsOpen(false)}} title="Open generation history">
+            <History size={13}/> HISTORY
+          </button>
+          <button type="button" className={settingsOpen ? 'active' : ''} onClick={()=>{setSettingsOpen(v=>!v);setMobileControlsOpen(false)}} title="Open settings">
+            <Settings2 size={13}/> SETTINGS
+          </button>
+        </div>
         {(busy || comfyStatus==='done' || comfyStatus==='error') && (
           <span className={'top-status ' + (comfyStatus==='error' ? 'error' : '')}>
             <span className="pulse-dot"/>
@@ -1721,6 +1750,7 @@ function App(){
 
     </aside>
 
+    {mobileControlsOpen && <div className="mobile-controls-backdrop" onMouseDown={()=>setMobileControlsOpen(false)}/>}
     <main className="content">
       <section className="stage-strip">
         {stages.map((s,i)=><div className={'stage ' + status[s.key] + ' ' + (stage===s.key ? 'current' : '')} key={s.key}>
@@ -1916,7 +1946,8 @@ function App(){
       {webHostError && <div className="error-box"><CircleAlert size={14}/><span>{webHostError}</span></div>}
     </main>
 
-    <aside className="right-rail">
+    <aside className={'right-rail ' + (mobileControlsOpen ? 'mobile-open' : '')}>
+      <button type="button" className="mobile-controls-close" onClick={()=>setMobileControlsOpen(false)}><X size={14}/> CLOSE CONTROLS</button>
       <div className="rail-label">MODELS</div>
       {selected && <div className="selected-model-card">
         <div className="selected-model-thumb"><ModelThumbnail model={selected} iconSize={22}/></div>
