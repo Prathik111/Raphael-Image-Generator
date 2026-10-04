@@ -91,6 +91,8 @@ struct PrepareRequest {
     setting: String, pose: String, expression: String, character: String,
     dress: String, composition: String, additional: String,
     random_lora_min: u32, random_lora_max: u32,
+    #[serde(default = "default_max_character_loras")]
+    max_character_loras: u32,
     #[serde(default)] registry_url: Option<String>,
 }
 
@@ -784,6 +786,8 @@ async fn list_provider_models(settings:LlmSettings)->Result<Vec<String>,String>{
 
 fn random_one(values:&[&str])->String{values.choose(&mut rand::rng()).unwrap_or(&"").to_string()}
 
+fn default_max_character_loras() -> u32 { 1 }
+
 fn registry_model_id(id: &str) -> &str {
     id.split_once("::file:")
         .map(|(model_id, _)| model_id)
@@ -858,31 +862,52 @@ async fn prepare_generation(req: PrepareRequest) -> Result<PreparedGeneration, S
         );
     }
 
-    let wanted = req.character.trim().to_lowercase();
-    let manual_character = manual.iter().copied()
-        .find(|lora| is_character_lora_for_checkpoint(lora, &req.checkpoint));
-
-    if !wanted.is_empty() && manual_character.is_some()
-        && !manual_character.unwrap().name.to_lowercase().contains(&wanted)
-        && !manual_character.unwrap().tags.iter().any(|tag| tag.to_lowercase().contains(&wanted))
-    {
-        return Err("The selected character LoRA does not match the requested character.".into());
+    let max_character_loras=req.max_character_loras.max(1) as usize;
+    let manual_character_count=manual.iter().filter(|lora| is_character_lora_for_checkpoint(lora, &req.checkpoint)).count();
+    if manual_character_count>max_character_loras {
+        return Err(format!(
+            "Selected LoRA stack contains {manual_character_count} character LoRAs, exceeding the configured maximum of {max_character_loras}."
+        ));
     }
 
-    let character = if !wanted.is_empty() {
-        *chars.iter().find(|lora| {
+    let wanted = req.character.trim().to_lowercase();
+    let requested_character = if !wanted.is_empty() {
+        Some(*chars.iter().find(|lora| {
             lora.name.to_lowercase().contains(&wanted)
                 || lora.tags.iter().any(|tag| tag.to_lowercase().contains(&wanted))
-        }).ok_or("Requested character does not match a compatible Registry character LoRA.")?
-    } else if let Some(lora) = manual_character {
-        lora
+        }).ok_or("Requested character does not match a compatible Registry character LoRA.")?)
     } else {
-        *chars.choose(&mut rand::rng()).unwrap()
+        None
     };
+
+    let manual_matching_character = requested_character.and_then(|wanted_lora| {
+        manual.iter().copied().find(|lora| lora.id == wanted_lora.id)
+    });
+    let manual_character=manual.iter().copied()
+        .find(|lora| is_character_lora_for_checkpoint(lora, &req.checkpoint));
+
+    let character = requested_character
+        .or(manual_matching_character)
+        .or(manual_character)
+        .unwrap_or_else(|| *chars.choose(&mut rand::rng()).unwrap());
 
     let chosen: Vec<&ModelInfo> = if !manual.is_empty() {
         let mut picked = manual.clone();
-        if !picked.iter().any(|lora| lora.id == character.id) {
+        if let Some(requested)=requested_character {
+            if !picked.iter().any(|lora| lora.id == requested.id) {
+                if manual_character_count>=max_character_loras {
+                    return Err(format!(
+                        "The requested character LoRA cannot be added because the selected stack already contains the configured maximum of {max_character_loras} character LoRAs."
+                    ));
+                }
+                picked.insert(0, requested);
+            }
+        } else if manual_character.is_none() {
+            if manual_character_count>=max_character_loras {
+                return Err(format!(
+                    "A character LoRA is required, but the selected stack already uses the maximum of {max_character_loras} character LoRAs."
+                ));
+            }
             picked.insert(0, character);
         }
         picked
@@ -893,7 +918,14 @@ async fn prepare_generation(req: PrepareRequest) -> Result<PreparedGeneration, S
         let mut pool: Vec<&ModelInfo> = compatible.into_iter().filter(|lora| lora.id != character.id).collect();
         pool.shuffle(&mut rand::rng());
         let mut picked = vec![character];
-        picked.extend(pool.into_iter().take(count.saturating_sub(1)));
+        let mut character_count=1usize;
+        for lora in pool {
+            if picked.len()>=count { break; }
+            let is_character=is_character_lora_for_checkpoint(lora, &req.checkpoint);
+            if is_character && character_count>=max_character_loras { continue; }
+            picked.push(lora);
+            if is_character { character_count+=1; }
+        }
         picked
     };
 
@@ -2033,6 +2065,7 @@ mod tests {
             setting:"classroom".into(), pose:"standing".into(), expression:"smiling".into(),
             character:"".into(), dress:"".into(), composition:"three-quarter".into(),
             additional:"".into(), random_lora_min:2, random_lora_max:2,
+            max_character_loras:1,
             registry_url:None,
         }).await.expect("prepare_generation dry run must succeed");
         assert_eq!(prepared.loras.len(), 2);
