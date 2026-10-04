@@ -1215,42 +1215,75 @@ fn comfy_relative_model_name(path: &str, folder: &str, fallback: &str) -> String
     fallback.to_string()
 }
 
+
+fn checkpoint_path_uses_unet_loader(path: &str) -> bool {
+    let normalized = path.replace('\\', "/").to_lowercase();
+    normalized.contains("models/unet/")
+        || normalized.contains("models/diffusion_models/")
+}
+
 #[tauri::command]
 fn build_workflow(req:WorkflowRequest)->Result<Value,String>{
-    // Reference workflow: Anima UNET + CLIP + VAE + text encoders + sampler + decode + save.
-    // Only the model LoRA chain is generated dynamically.
+    // Select the loader from the model's actual ComfyUI location.
+    // Files under models/unet or models/diffusion_models are UNETLoader
+    // inputs; files under models/checkpoints are full CheckpointLoaderSimple
+    // inputs. This prevents a checkpoint-path model from being submitted to
+    // UNETLoader, which ComfyUI correctly rejects during validation.
     let mut map=serde_json::Map::new();
 
-    let unet_name = comfy_relative_model_name(
-        &req.checkpoint.path,
-        "unet",
-        Path::new(&req.checkpoint.path)
-            .file_name()
-            .and_then(|x|x.to_str())
-            .unwrap_or(&req.checkpoint.name),
-    );
-    map.insert("13".into(),json!({
-        "class_type":"UNETLoader",
-        "inputs":{"unet_name":unet_name,"weight_dtype":"default"}
-    }));
+    let use_unet_loader = checkpoint_path_uses_unet_loader(&req.checkpoint.path);
 
-    map.insert("4".into(),json!({
-        "class_type":"CLIPLoader",
-        "inputs":{"clip_name":"anima\\oneObsession_anima29BV1_txt.safetensors","type":"stable_diffusion","device":"default"}
-    }));
+    let model_input = if use_unet_loader {
+        let unet_name = comfy_relative_model_name(
+            &req.checkpoint.path,
+            "unet",
+            Path::new(&req.checkpoint.path)
+                .file_name()
+                .and_then(|x|x.to_str())
+                .unwrap_or(&req.checkpoint.name),
+        );
+        json!({
+            "class_type":"UNETLoader",
+            "inputs":{"unet_name":unet_name,"weight_dtype":"default"}
+        })
+    } else {
+        let checkpoint_name = comfy_relative_model_name(
+            &req.checkpoint.path,
+            "checkpoints",
+            Path::new(&req.checkpoint.path)
+                .file_name()
+                .and_then(|x|x.to_str())
+                .unwrap_or(&req.checkpoint.name),
+        );
+        json!({
+            "class_type":"CheckpointLoaderSimple",
+            "inputs":{"ckpt_name":checkpoint_name}
+        })
+    };
+    map.insert("13".into(),model_input);
 
-    map.insert("9".into(),json!({
-        "class_type":"VAELoader",
-        "inputs":{"vae_name":"anima\\qwen_image_vae.safetensors"}
-    }));
+    if use_unet_loader {
+        map.insert("4".into(),json!({
+            "class_type":"CLIPLoader",
+            "inputs":{"clip_name":"anima\\oneObsession_anima29BV1_txt.safetensors","type":"stable_diffusion","device":"default"}
+        }));
+
+        map.insert("9".into(),json!({
+            "class_type":"VAELoader",
+            "inputs":{"vae_name":"anima\\qwen_image_vae.safetensors"}
+        }));
+    }
+
+    let clip_ref = if use_unet_loader { json!(["4",0]) } else { json!(["13",1]) };
+    let vae_ref = if use_unet_loader { json!(["9",0]) } else { json!(["13",2]) };
 
     map.insert("5".into(),json!({
         "class_type":"CLIPTextEncode",
-        "inputs":{"clip":["4",0],"text":"__POSITIVE_PROMPT__"}
+        "inputs":{"clip":clip_ref.clone(),"text":"__POSITIVE_PROMPT__"}
     }));
     map.insert("6".into(),json!({
         "class_type":"CLIPTextEncode",
-        "inputs":{"clip":["4",0],"text":"__NEGATIVE_PROMPT__"}
+        "inputs":{"clip":clip_ref,"text":"__NEGATIVE_PROMPT__"}
     }));
 
     map.insert("8".into(),json!({
@@ -1300,7 +1333,7 @@ fn build_workflow(req:WorkflowRequest)->Result<Value,String>{
 
     map.insert("10".into(),json!({
         "class_type":"VAEDecode",
-        "inputs":{"samples":["7",0],"vae":["9",0]}
+        "inputs":{"samples":["7",0],"vae":vae_ref}
     }));
 
     map.insert("12".into(),json!({
