@@ -585,22 +585,24 @@ async fn scan_registry_library(req: &ScanRequest) -> Result<LibrarySnapshot, Str
 
     let (base_url, token) = ensure_registry(req.registry_url.as_deref()).await?;
 
-    // Prefer the Registry's typed, server-side paginated endpoints. They
-    // cannot lose checkpoint records simply because unrelated model types
-    // make the canonical catalog larger. Fall back to the canonical catalog
-    // when talking to an older Registry build that lacks the typed routes.
-    let (checkpoint_result, lora_result) = tokio::join!(
+    // Prefer the Registry's typed, server-side paginated endpoints, but
+    // also read the canonical model catalog once. This is a defensive
+    // compatibility path for older Registry databases whose model_type
+    // casing may not match the typed SQL predicate exactly.
+    let (checkpoint_result, lora_result, canonical_result) = tokio::join!(
         registry_models(&base_url, &token, "/api/v1/checkpoints"),
         registry_models(&base_url, &token, "/api/v1/loras"),
+        registry_models(&base_url, &token, "/api/v1/models"),
     );
 
     let mut used_canonical_fallback = false;
-    let (checkpoint_models, lora_models): (Vec<RegistryModel>, Vec<RegistryModel>) =
+    let (mut checkpoint_models, mut lora_models): (Vec<RegistryModel>, Vec<RegistryModel>) =
         match (checkpoint_result, lora_result) {
             (Ok(checkpoints), Ok(loras)) => (checkpoints, loras),
             _ => {
                 used_canonical_fallback = true;
-                let all_models = registry_models(&base_url, &token, "/api/v1/models").await?;
+                let all_models = canonical_result.clone()
+                    .map_err(|error| error)?;
                 let checkpoints = all_models
                     .iter()
                     .filter(|model| model.model_type.eq_ignore_ascii_case("checkpoint"))
@@ -614,6 +616,20 @@ async fn scan_registry_library(req: &ScanRequest) -> Result<LibrarySnapshot, Str
                 (checkpoints, loras)
             }
         };
+
+    if let Ok(all_models) = canonical_result {
+        for model in all_models {
+            if model.model_type.eq_ignore_ascii_case("checkpoint")
+                && !checkpoint_models.iter().any(|item| item.id == model.id)
+            {
+                checkpoint_models.push(model);
+            } else if model.model_type.eq_ignore_ascii_case("lora")
+                && !lora_models.iter().any(|item| item.id == model.id)
+            {
+                lora_models.push(model);
+            }
+        }
+    }
 
     let mut checkpoints = Vec::new();
     let mut loras = Vec::new();
