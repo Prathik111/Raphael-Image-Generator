@@ -568,6 +568,24 @@ function App(){
     );
   },[allLoras,loraSearch]);
 
+  const duplicateCheckpointNames=useMemo(()=>{
+    const counts=new Map<string,number>();
+    for(const model of library?.checkpoints || []){
+      const key=model.name.trim().toLowerCase();
+      counts.set(key,(counts.get(key) || 0)+1);
+    }
+    return counts;
+  },[library]);
+
+  const duplicateLoraNames=useMemo(()=>{
+    const counts=new Map<string,number>();
+    for(const model of allLoras){
+      const key=model.name.trim().toLowerCase();
+      counts.set(key,(counts.get(key) || 0)+1);
+    }
+    return counts;
+  },[allLoras]);
+
   useEffect(()=>{
     void loadHistory();
     void discoverRoots();
@@ -632,7 +650,16 @@ function App(){
         req:{comfyRoot:rootOverride,registryUrl:registryOverride || null},
       });
       setLibrary(snap);
-      if(!selectedId && snap.checkpoints[0]) setSelectedId(snap.checkpoints[0].id);
+
+      // Keep the selected Registry-file identity when it still exists.
+      // When a Manager deletion removes that file, immediately move selection
+      // to the first remaining checkpoint instead of retaining a dead ID and
+      // silently falling back to an unrelated model.
+      setSelectedId(current=>{
+        if(current && snap.checkpoints.some(model=>model.id===current)) return current;
+        return snap.checkpoints[0]?.id || '';
+      });
+
       const ids=new Set(snap.loras.map(x=>x.id));
       setSelectedLoraIds(current=>current.filter(id=>ids.has(id)));
       setManualLoraIds(current=>current.filter(id=>ids.has(id)));
@@ -1318,11 +1345,15 @@ function App(){
         <div className="right-section-head"><span>CHECKPOINTS</span><span>{filteredCheckpoints.length}</span></div>
         <div className="search-row compact"><Search size={13}/><input value={checkpointSearch} onChange={e=>setCheckpointSearch(e.target.value)} placeholder="Search checkpoints"/></div>
         <div className="checkpoint-list">
-          {filteredCheckpoints.map(model=><button key={model.id} title={[model.name,model.baseModel || '',...model.tags].filter(Boolean).join(' · ')} className={'checkpoint-row ' + (selected?.id===model.id ? 'selected' : '')} onClick={()=>selectCheckpoint(model.id)}>
-            <div className="checkpoint-row-thumb"><ModelThumbnail model={model} iconSize={16}/></div>
-            <div className="checkpoint-row-copy"><b>{model.name}</b><span>{model.baseModel || 'BASE UNKNOWN'}</span><small>{model.tags.slice(0,3).join(' · ')}</small></div>
-            {selected?.id===model.id && <Check size={14}/>}
-          </button>)}
+          {filteredCheckpoints.map(model=>{
+            const duplicate=duplicateCheckpointNames.get(model.name.trim().toLowerCase()) || 0;
+            const filename=model.path.split(/[\\/]/).pop() || model.path;
+            return <button key={model.id} title={[model.name,model.baseModel || '',filename,...model.tags].filter(Boolean).join(' · ')} className={'checkpoint-row ' + (selected?.id===model.id ? 'selected' : '')} onClick={()=>selectCheckpoint(model.id)}>
+              <div className="checkpoint-row-thumb"><ModelThumbnail model={model} iconSize={16}/></div>
+              <div className="checkpoint-row-copy"><b>{model.name}</b><span>{model.baseModel || 'BASE UNKNOWN'}</span><small>{duplicate>1 ? filename : model.tags.slice(0,3).join(' · ')}</small></div>
+              {selected?.id===model.id && <Check size={14}/>}
+            </button>;
+          })}
         </div>
       </div>
 
@@ -1330,11 +1361,15 @@ function App(){
         <div className="right-section-head"><span>LORAS</span><span>{selectedLoraIds.length} / {allLoras.length}</span></div>
         <div className="search-row compact"><Search size={13}/><input value={loraSearch} onChange={e=>setLoraSearch(e.target.value)} placeholder="Search LoRAs"/></div>
         <div className="lora-list">
-          {filteredLoras.map(lora=><button key={lora.id} title={[lora.name,lora.baseModel || '',...lora.tags].filter(Boolean).join(' · ')} className={'lora-row ' + (selectedLoraIds.includes(lora.id) ? 'selected' : '')} onClick={()=>toggleLora(lora.id)}>
-            <div className="lora-row-thumb"><ModelThumbnail model={lora} iconSize={15}/></div>
-            <div className="lora-row-copy"><b>{lora.name}</b><span>{lora.character ? 'CHARACTER' : 'SUPPORT'}</span><small>{lora.tags.slice(0,3).join(' · ')}</small></div>
-            {selectedLoraIds.includes(lora.id) && <Check size={14}/>}
-          </button>)}
+          {filteredLoras.map(lora=>{
+            const duplicate=duplicateLoraNames.get(lora.name.trim().toLowerCase()) || 0;
+            const filename=lora.path.split(/[\\/]/).pop() || lora.path;
+            return <button key={lora.id} title={[lora.name,lora.baseModel || '',filename,...lora.tags].filter(Boolean).join(' · ')} className={'lora-row ' + (selectedLoraIds.includes(lora.id) ? 'selected' : '')} onClick={()=>toggleLora(lora.id)}>
+              <div className="lora-row-thumb"><ModelThumbnail model={lora} iconSize={15}/></div>
+              <div className="lora-row-copy"><b>{lora.name}</b><span>{lora.character ? 'CHARACTER' : 'SUPPORT'}</span><small>{duplicate>1 ? filename : lora.tags.slice(0,3).join(' · ')}</small></div>
+              {selectedLoraIds.includes(lora.id) && <Check size={14}/>}
+            </button>;
+          })}
         </div>
       </div>
 
