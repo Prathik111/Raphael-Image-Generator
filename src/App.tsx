@@ -195,6 +195,8 @@ const defaultMaxTagLength = 64;
 const absoluteMaxTagLength = 256;
 const defaultPlannerTemperature = 0.35;
 const defaultTagTemperature = 0.72;
+const defaultTagGenerationRetries = 2;
+const absoluteMaxTagGenerationRetries = 8;
 const defaultMaxCharacterLoras = 1;
 const absoluteMaxLoraLimit = 16;
 
@@ -222,6 +224,7 @@ interface StoredGenerationSettings {
   maxTagLength?: number;
   plannerTemperature?: number;
   tagTemperature?: number;
+  tagGenerationRetries?: number;
   maxCharacterLoras?: number;
   manualLoraIds?: string[];
 }
@@ -279,6 +282,7 @@ function loadPersistedGenerationSettings(): StoredGenerationSettings {
 
     migrated.maxNegativeTags=Math.max(1,Math.min(absoluteMaxTagLimit,migrated.maxNegativeTags ?? defaultMaxNegativeTags));
     migrated.maxTagLength=Math.max(1,Math.min(absoluteMaxTagLength,migrated.maxTagLength ?? defaultMaxTagLength));
+    migrated.tagGenerationRetries=Math.max(0,Math.min(absoluteMaxTagGenerationRetries,migrated.tagGenerationRetries ?? defaultTagGenerationRetries));
     migrated.minPositiveTags=Math.max(1,Math.min(100,migrated.minPositiveTags ?? defaultMinPositiveTags));
     migrated.minNegativeTags=Math.max(1,Math.min(migrated.maxNegativeTags,migrated.minNegativeTags ?? defaultMinNegativeTags));
 
@@ -793,6 +797,7 @@ function App(){
     maxTagLength:Math.max(1,Math.min(absoluteMaxTagLength,persistedGenerationSettings.maxTagLength ?? defaultMaxTagLength)),
     plannerTemperature:Math.max(0,Math.min(2,persistedGenerationSettings.plannerTemperature ?? defaultPlannerTemperature)),
     tagTemperature:Math.max(0,Math.min(2,persistedGenerationSettings.tagTemperature ?? defaultTagTemperature)),
+    tagGenerationRetries:Math.max(0,Math.min(absoluteMaxTagGenerationRetries,persistedGenerationSettings.tagGenerationRetries ?? defaultTagGenerationRetries)),
     maxCharacterLoras:Math.max(1,Math.min(absoluteMaxLoraLimit,persistedGenerationSettings.maxCharacterLoras ?? defaultMaxCharacterLoras)),
   });
   const [selectedHistoryId,setSelectedHistoryId]=useState('');
@@ -996,6 +1001,7 @@ function App(){
       maxTagLength:Math.max(1,Math.min(absoluteMaxTagLength,Number(draft.maxTagLength) || defaultMaxTagLength)),
       plannerTemperature:Math.max(0,Math.min(2,Number(draft.plannerTemperature) || 0)),
       tagTemperature:Math.max(0,Math.min(2,Number(draft.tagTemperature) || 0)),
+      tagGenerationRetries:Math.max(0,Math.min(absoluteMaxTagGenerationRetries,Number.isFinite(Number(draft.tagGenerationRetries)) ? Number(draft.tagGenerationRetries) : defaultTagGenerationRetries)),
       maxCharacterLoras:Math.max(1,Math.min(cappedMax,Number(draft.maxCharacterLoras) || defaultMaxCharacterLoras)),
       minPositiveTags:Math.max(1,Math.min(100,Number(draft.minPositiveTags) || defaultMinPositiveTags)),
       minNegativeTags:Math.max(1,Math.min(Math.max(1,Math.min(absoluteMaxTagLimit,Number(draft.maxNegativeTags) || defaultMaxNegativeTags)),Number(draft.minNegativeTags) || defaultMinNegativeTags)),
@@ -1402,13 +1408,13 @@ function App(){
       );
       let validationAttempt=0;
 
-      while((!validation.valid || promptNeedsExpansion(rawPair)) && validationAttempt<2){
+      while((!validation.valid || promptNeedsExpansion(rawPair)) && validationAttempt<generationDraft.tagGenerationRetries){
         validationAttempt+=1;
         const deficiency=[
           ...validation.errors,
           ...(promptNeedsExpansion(rawPair) ? ['prompt does not contain enough scene coverage or visual detail'] : []),
         ];
-        setTagValidation('TAG VALIDATION FAILED — REDO '+validationAttempt+'/2: '+deficiency.join(' · '));
+        setTagValidation('TAG VALIDATION FAILED — REDO '+validationAttempt+'/'+generationDraft.tagGenerationRetries+': '+deficiency.join(' · '));
         streamText.current='';
         flushSync(()=>setStream(''));
 
@@ -1445,7 +1451,7 @@ function App(){
 
       if(!validation.valid || promptNeedsExpansion(rawPair)){
         throw new Error(
-          'LLM prompt validation failed after 2 repair attempts: '+
+          'LLM prompt validation failed after '+generationDraft.tagGenerationRetries+' repair attempts: '+
           [...validation.errors, ...(promptNeedsExpansion(rawPair) ? ['insufficient scene coverage'] : [])].join(' · ')
         );
       }
@@ -1545,6 +1551,7 @@ function App(){
         maxTagLength:generationDraft.maxTagLength,
         plannerTemperature:generationDraft.plannerTemperature,
         tagTemperature:generationDraft.tagTemperature,
+        tagGenerationRetries:generationDraft.tagGenerationRetries,
         maxCharacterLoras:generationDraft.maxCharacterLoras,
       };
       const record:GenerationRecord={
@@ -1843,6 +1850,7 @@ function App(){
               <div><span>DEMOGRAPHIC</span><b>{selectedHistory.generationSettings.demographic.toUpperCase()}</b></div>
               <div><span>PLANNER TEMPERATURE</span><b>{(selectedHistory.generationSettings.plannerTemperature ?? selectedHistory.generationSettings.llm.temperature).toFixed(2)}</b></div>
               <div><span>TAG GENERATOR TEMPERATURE</span><b>{(selectedHistory.generationSettings.tagTemperature ?? selectedHistory.generationSettings.llm.temperature).toFixed(2)}</b></div>
+              <div><span>TAG GENERATION RETRIES</span><b>{selectedHistory.generationSettings.tagGenerationRetries ?? defaultTagGenerationRetries}</b></div>
               <div><span>BASE TEMPERATURE</span><b>{selectedHistory.generationSettings.llm.temperature.toFixed(2)}</b></div>
               <div><span>MAX TOKENS</span><b>{selectedHistory.generationSettings.llm.maxTokens}</b></div>
               <div><span>CONTEXT TOKENS</span><b>{selectedHistory.generationSettings.llm.contextTokens || 16384}</b></div>
@@ -2182,6 +2190,18 @@ function App(){
                     onChange={e=>setGenerationDraft(d=>({...d,maxTagLength:Math.max(1,Math.min(absoluteMaxTagLength,Number(e.target.value)||1))}))}
                   />
                   <small>Default: {defaultMaxTagLength} · absolute maximum: {absoluteMaxTagLength}</small>
+                </label>
+                <label className="settings-field settings-number-field">
+                  <span>TAG GENERATION RETRIES</span>
+                  <input
+                    type="number"
+                    min={0}
+                    max={absoluteMaxTagGenerationRetries}
+                    step={1}
+                    value={generationDraft.tagGenerationRetries}
+                    onChange={e=>setGenerationDraft(d=>({...d,tagGenerationRetries:Math.max(0,Math.min(absoluteMaxTagGenerationRetries,Number(e.target.value)||0))}))}
+                  />
+                  <small>Default: {defaultTagGenerationRetries} · number of repair calls after the initial tag generation</small>
                 </label>
               </div>
             </section>
