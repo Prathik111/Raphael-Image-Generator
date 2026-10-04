@@ -1262,20 +1262,21 @@ fn build_workflow(req:WorkflowRequest)->Result<Value,String>{
     };
     map.insert("13".into(),model_input);
 
-    if use_unet_loader {
-        map.insert("4".into(),json!({
-            "class_type":"CLIPLoader",
-            "inputs":{"clip_name":"anima\\oneObsession_anima29BV1_txt.safetensors","type":"stable_diffusion","device":"default"}
-        }));
+    // Some Anima checkpoint files are packaged without an embedded CLIP/text
+    // encoder or VAE. Always use the known-good external Anima encoders rather
+    // than trusting CheckpointLoaderSimple's optional outputs.
+    map.insert("4".into(),json!({
+        "class_type":"CLIPLoader",
+        "inputs":{"clip_name":"anima\\oneObsession_anima29BV1_txt.safetensors","type":"stable_diffusion","device":"default"}
+    }));
 
-        map.insert("9".into(),json!({
-            "class_type":"VAELoader",
-            "inputs":{"vae_name":"anima\\qwen_image_vae.safetensors"}
-        }));
-    }
+    map.insert("9".into(),json!({
+        "class_type":"VAELoader",
+        "inputs":{"vae_name":"anima\\qwen_image_vae.safetensors"}
+    }));
 
-    let clip_ref = if use_unet_loader { json!(["4",0]) } else { json!(["13",1]) };
-    let vae_ref = if use_unet_loader { json!(["9",0]) } else { json!(["13",2]) };
+    let clip_ref = json!(["4",0]);
+    let vae_ref = json!(["9",0]);
 
     map.insert("5".into(),json!({
         "class_type":"CLIPTextEncode",
