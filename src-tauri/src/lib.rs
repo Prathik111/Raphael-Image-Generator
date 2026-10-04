@@ -1589,7 +1589,8 @@ async fn web_command(
             })).map_err(|e|e.to_string())
         }
         "update_web_host_llm"=>{
-            let settings=serde_json::from_value::<LlmSettings>(req_value).map_err(|e|e.to_string())?;
+            let settings_value=body.get("llmSettings").cloned().unwrap_or(req_value);
+            let settings=serde_json::from_value::<LlmSettings>(settings_value).map_err(|e|e.to_string())?;
             *state.llm.lock().await=settings;
             Ok(Value::Null)
         }
