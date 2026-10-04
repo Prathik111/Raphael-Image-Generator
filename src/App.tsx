@@ -7,11 +7,32 @@ import {
 } from 'lucide-react';
 import type {
   Constraints, DemographicLevel, DemographicPrompts, GenerationRecord, GenerationSettings, LibrarySnapshot,
-  LlmSettings, PreparedGeneration, PromptPair, ProviderKind, WebHostInfo
+  LlmSettings, PreparedGeneration, PromptPair, ProviderKind, SceneSelection, WebHostInfo
 } from './types';
 
-type Stage = 'library' | 'compatibility' | 'selection' | 'llm' | 'workflow' | 'comfy' | 'recorded';
+type Stage = 'library' | 'compatibility' | 'selection' | 'planning' | 'llm' | 'workflow' | 'comfy' | 'recorded';
 type Status = 'idle' | 'running' | 'done' | 'error';
+
+interface GenerationPlan {
+  character: string;
+  action: string;
+  pose: string;
+  setting: string;
+  background: string;
+  expression: string;
+  dress: string;
+  composition: string;
+  lighting: string;
+  camera: string;
+  framing: string;
+}
+
+interface PromptValidation {
+  valid: boolean;
+  errors: string[];
+  positiveTags: string[];
+  negativeTags: string[];
+}
 
 const isTauriRuntime =
   typeof window !== 'undefined' &&
@@ -33,6 +54,32 @@ const defaultDemographicPrompts: DemographicPrompts = {
 
 const demographicPromptsStorageKey = 'raphael-image-generator.demographic-prompts.v1';
 
+const defaultPlanningPrompt = `PLANNING PHASE. Do not write image-model prompt tags yet.
+Decide the concrete visual plan that the next stage will convert into deterministic tags.
+
+Return JSON only with exactly these string fields:
+character, action, pose, setting, background, expression, dress, composition, lighting, camera, framing.
+
+Use short canonical choices, not sentences or metaphors.
+Preserve any explicit user constraints exactly enough to satisfy them.
+When a field is blank/random, make a specific decision.
+The plan must be internally consistent: pose, action, expression, camera and framing must match the setting and background.
+Do not mention model names, filenames or LoRA implementation syntax.
+
+CHECKPOINT: {{CHECKPOINT}}
+BASE: {{BASE}}
+SELECTED LoRA METADATA:
+{{LORA_METADATA}}
+
+USER CONSTRAINTS:
+CHARACTER: {{CHARACTER}}
+SETTING: {{SETTING}}
+POSE: {{POSE}}
+EXPRESSION: {{EXPRESSION}}
+DRESS: {{DRESS}}
+COMPOSITION: {{COMPOSITION}}
+EXTRA: {{EXTRA}}`;
+
 const defaultUserPromptTemplate = `CHECKPOINT: {{CHECKPOINT}}
 BASE: {{BASE}}
 COMPATIBILITY: {{COMPATIBILITY}}
@@ -49,9 +96,9 @@ DRESS: {{DRESS}}
 COMPOSITION: {{COMPOSITION}}
 EXTRA: {{EXTRA}}
 
-Write the FINAL positive and negative prompts that will be sent directly to the image model. The positive prompt must be one long, coherent, comma-separated tag string of 90-160 words with at least 18 meaningful visual tags or short phrases. Use the selected LoRA metadata as actual prompt-building input, not as reference-only information. For every documented activation prompt, include the exact activation phrase in the positive prompt at least once, unchanged, and place it naturally next to the visual concept it activates instead of collecting activation prompts at the end. The LoRA description explains what visual concept the activation prompt controls; use that description to decide where and how that activation phrase belongs. Do not invent or paraphrase activation prompts, and do not omit them. Do not expose LoRA implementation syntax such as <lora:...> or weighted [LoRA - ...] notation. Do not mention checkpoint/model names, filenames or base-model labels. Explicitly cover subject state/action, pose, hands/arms, head direction, gaze, facial expression, emotional state, clothing/accessories, interaction, setting, background/environment, atmosphere, camera viewpoint, framing, perspective, depth, lighting, color/mood, materials and finishing details using short literal tags or compact phrases only. Never turn these into sentences or metaphors. The negative prompt should be a useful 20-35 item comma-separated list of short concrete failure tags targeted to the actual image and selected LoRAs. Return JSON only.`;
+Write the FINAL positive and negative prompts that will be sent directly to the image model. The positive prompt must be one long, coherent, comma-separated tag string of 90-160 words with at least 24 meaningful visual tags or short phrases. Use the selected LoRA metadata as actual prompt-building input, not as reference-only information. For every documented activation prompt, include the exact activation phrase in the positive prompt at least once, unchanged, and place it naturally next to the visual concept it activates instead of collecting activation prompts at the end. The LoRA description explains what visual concept the activation prompt controls; use that description to decide where and how that activation phrase belongs. Do not invent or paraphrase activation prompts, and do not omit them. Do not expose LoRA implementation syntax such as <lora:...> or weighted [LoRA - ...] notation. Do not mention checkpoint/model names, filenames or base-model labels. Explicitly cover subject state/action, pose, hands/arms, head direction, gaze, facial expression, emotional state, clothing/accessories, interaction, setting, background/environment, atmosphere, camera viewpoint, framing, perspective, depth, lighting, color/mood, materials and finishing details using short literal tags or compact phrases only. Never turn these into sentences or metaphors. The negative prompt should be a useful 20-35 item comma-separated list of short concrete failure tags targeted to the actual image and selected LoRAs. Return JSON only.`;
 
-const defaultExpansionPromptTemplate = `EXPANSION PASS. Rewrite the previous result as the final production prompt pair in deterministic tag format. Preserve every required scene constraint and every documented LoRA activation prompt. Each activation prompt must appear exactly as documented, at least once, beside the visual concept described by its LoRA, not as an appended block at the end. Use the LoRA descriptions to understand the intended visual effect. Do not remove or paraphrase activation prompts. Remove checkpoint names, model filenames, LoRA names and implementation syntax such as <lora:...> or weighted [LoRA - ...] notation. Rewrite the positive prompt as ONE long, coherent comma-separated tag string of 90-160 words with at least 18 meaningful visual tags or short phrases. No sentences, metaphors, storytelling, poetic language or sentence punctuation. Use literal canonical tags, mostly 1-5 words each. Explicitly include subject identity, visible appearance, current state, action/activity, body pose, hands/arms, head direction, gaze, facial expression, emotional state, clothing/accessories, interaction with surroundings, setting, background/environment, atmosphere, camera viewpoint, shot type, framing, perspective, depth, lighting direction/quality, color/mood, materials/textures and finishing details. Do not rely on any LoRA to provide expression, pose, state, background or composition. Also provide a targeted 20-35 item negative tag list. Return JSON only.
+const defaultExpansionPromptTemplate = `EXPANSION PASS. Rewrite the previous result as the final production prompt pair in deterministic tag format. Preserve every required scene constraint and every documented LoRA activation prompt. Each activation prompt must appear exactly as documented, at least once, beside the visual concept described by its LoRA, not as an appended block at the end. Use the LoRA descriptions to understand the intended visual effect. Do not remove or paraphrase activation prompts. Remove checkpoint names, model filenames, LoRA names and implementation syntax such as <lora:...> or weighted [LoRA - ...] notation. Rewrite the positive prompt as ONE long, coherent comma-separated tag string of 90-160 words with at least 24 meaningful visual tags or short phrases. No sentences, metaphors, storytelling, poetic language or sentence punctuation. Use literal canonical tags, mostly 1-6 words each. Explicitly include subject identity, visible appearance, current state, action/activity, body pose, hands/arms, head direction, gaze, facial expression, emotional state, clothing/accessories, interaction with surroundings, setting, background/environment, atmosphere, camera viewpoint, shot type, framing, perspective, depth, lighting direction/quality, color/mood, materials/textures and finishing details. Do not rely on any LoRA to provide expression, pose, state, background or composition. Also provide a targeted 20-35 item negative tag list. Return JSON only.
 
 CHECKPOINT: {{CHECKPOINT}}
 BASE: {{BASE}}
@@ -140,7 +187,8 @@ const stages: Array<{key: Stage; label: string}> = [
   {key:'library',label:'LIBRARY'},
   {key:'compatibility',label:'COMPATIBILITY'},
   {key:'selection',label:'MODEL STACK'},
-  {key:'llm',label:'LLM PROMPT'},
+  {key:'planning',label:'PLANNING'},
+  {key:'llm',label:'TAG GENERATION'},
   {key:'workflow',label:'WORKFLOW'},
   {key:'comfy',label:'COMFYUI'},
   {key:'recorded',label:'RECORDED'},
@@ -306,6 +354,73 @@ function ModelThumbnail({model,iconSize=18}:{model:LibrarySnapshot['checkpoints'
       : <Layers3 size={iconSize} aria-hidden="true"/>}
   </span>;
 }
+function extractJsonObject(raw:string):Record<string,unknown>{
+  let clean=raw.trim();
+  if(clean.includes('</think>')) clean=clean.slice(clean.lastIndexOf('</think>')+8).trim();
+  clean=clean.replace(/```json/gi,'').replace(/```/g,'').trim();
+  const start=clean.indexOf('{');
+  const end=clean.lastIndexOf('}');
+  if(start<0 || end<start) throw new Error('LLM did not return a JSON object.');
+  const value=JSON.parse(clean.slice(start,end+1)) as unknown;
+  if(!value || typeof value!=='object' || Array.isArray(value)) throw new Error('LLM returned a non-object JSON value.');
+  return value as Record<string,unknown>;
+}
+
+function textField(value:unknown,fallback=''):string{
+  return typeof value==='string' ? value.trim() : fallback;
+}
+
+function parseGenerationPlan(raw:string, fallback:SceneSelection):GenerationPlan{
+  const value=extractJsonObject(raw);
+  const plan:GenerationPlan={
+    character:textField(value.character,fallback.character),
+    action:textField(value.action,'natural pose'),
+    pose:textField(value.pose,fallback.pose),
+    setting:textField(value.setting,fallback.setting),
+    background:textField(value.background,fallback.setting),
+    expression:textField(value.expression,fallback.expression),
+    dress:textField(value.dress,fallback.dress),
+    composition:textField(value.composition,fallback.composition),
+    lighting:textField(value.lighting,'soft cinematic lighting'),
+    camera:textField(value.camera,'eye level camera'),
+    framing:textField(value.framing,fallback.composition),
+  };
+  const missing=Object.entries(plan).filter(([,v])=>!v.trim()).map(([k])=>k);
+  if(missing.length) throw new Error('Planning response is missing: '+missing.join(', '));
+  return plan;
+}
+
+function splitPromptTags(value:string):string[]{
+  return value.split(',').map(tag=>tag.trim()).filter(Boolean);
+}
+
+function validateGeneratedPrompt(pair:PromptPair,activationTags:string[]):PromptValidation{
+  const positiveTags=splitPromptTags(pair.positive_prompt);
+  const negativeTags=splitPromptTags(pair.negative_prompt);
+  const exactActivationTags=new Set(activationTags.map(tag=>tag.trim()).filter(Boolean));
+  const errors:string[]=[];
+
+  if(positiveTags.length<24) errors.push(`positive prompt has only ${positiveTags.length} tags; minimum is 24`);
+  if(negativeTags.length<20) errors.push(`negative prompt has only ${negativeTags.length} tags; minimum is 20`);
+  if(negativeTags.length>35) errors.push(`negative prompt has ${negativeTags.length} tags; maximum is 35`);
+
+  const validateTagList=(tags:string[],label:string,allowExactActivation:boolean)=>{
+    tags.forEach((tag,index)=>{
+      const words=tag.split(/\s+/).filter(Boolean).length;
+      const chars=tag.length;
+      const exactActivation=allowExactActivation && exactActivationTags.has(tag);
+      const sentenceLike=/[.!?;:]$/.test(tag) || /\b(because|therefore|while|which|that|this|these|then|and then)\b/i.test(tag);
+      if(!exactActivation && (words>6 || chars>64 || sentenceLike)){
+        errors.push(`${label} tag ${index+1} is sentence-like or too long: "${tag}"`);
+      }
+    });
+  };
+
+  validateTagList(positiveTags,'positive',true);
+  validateTagList(negativeTags,'negative',false);
+  return {valid:errors.length===0,errors,positiveTags,negativeTags};
+}
+
 async function consumeSse(
   url:string,
   body:Record<string, unknown>,
@@ -487,12 +602,15 @@ function App(){
 
   const [stage,setStage]=useState<Stage>('library');
   const [status,setStatus]=useState<Record<Stage,Status>>({
-    library:'idle', compatibility:'idle', selection:'idle', llm:'idle',
+    library:'idle', compatibility:'idle', selection:'idle', planning:'idle', llm:'idle',
     workflow:'idle', comfy:'idle', recorded:'idle',
   });
   const [busy,setBusy]=useState(false);
   const [error,setError]=useState('');
   const [toast,setToast]=useState('');
+  const [plan,setPlan]=useState<GenerationPlan|null>(null);
+  const [planStream,setPlanStream]=useState('');
+  const [tagValidation,setTagValidation]=useState('');
   const persistedManualLoraIds=Array.isArray(persistedGenerationSettings.manualLoraIds)
     ? persistedGenerationSettings.manualLoraIds.filter(id=>typeof id==='string')
     : [];
@@ -780,6 +898,9 @@ function App(){
 
     setPrepared(null);
     setPrompts(null);
+    setPlan(null);
+    setPlanStream('');
+    setTagValidation('');
     setStage('compatibility');
     setStageStatus('compatibility','running');
 
@@ -897,12 +1018,9 @@ function App(){
       setStageStatus('compatibility','done');
       setStage('selection');
       setStageStatus('selection','done');
-
-      setStage('llm');
-      setStageStatus('llm','running');
-      streamText.current='';
-      setStream('');
-      setPrompts(null);
+      setPlan(null);
+      setPlanStream('');
+      setTagValidation('');
 
       const loraMetadata=prep.loras.map((l,index)=>
         'LORA ' + (index+1) + '\n' +
@@ -915,10 +1033,10 @@ function App(){
       ).join('\n\n');
 
       // The selected demographic prompt is the complete system prompt.
-      // Nothing else is prepended, appended, or merged into it.
+      // Planning and tag generation are separate LLM passes.
       const selectedSystemPrompt = demographicPrompts[demographic];
 
-      const promptTemplateValues={
+      const basePromptValues={
         CHECKPOINT:prep.checkpoint.name,
         BASE:prep.checkpoint.baseModel || 'unknown',
         COMPATIBILITY:prep.compatibilityKeys.join(', '),
@@ -931,10 +1049,64 @@ function App(){
         COMPOSITION:prep.scene.composition,
         EXTRA:constraints.additional || '(none)',
       };
+
+      setStage('planning');
+      setStageStatus('planning','running');
+      streamText.current='';
+      setPlanStream('');
+      await streamLlm({
+        settings:llm,
+        systemPrompt:selectedSystemPrompt,
+        userPrompt:renderPromptTemplate(defaultPlanningPrompt,basePromptValues),
+      },event=>{
+        streamText.current+=event;
+        flushSync(()=>setPlanStream(streamText.current));
+      });
+
+      const generationPlan=parseGenerationPlan(streamText.current,prep.scene);
+      setPlan(generationPlan);
+      setStageStatus('planning','done');
+
+      const planValues={
+        ...basePromptValues,
+        CHARACTER:generationPlan.character,
+        SETTING:generationPlan.setting,
+        POSE:generationPlan.pose,
+        EXPRESSION:generationPlan.expression,
+        DRESS:generationPlan.dress,
+        COMPOSITION:generationPlan.composition,
+        ACTION:generationPlan.action,
+        BACKGROUND:generationPlan.background,
+        LIGHTING:generationPlan.lighting,
+        CAMERA:generationPlan.camera,
+        FRAMING:generationPlan.framing,
+      };
+
+      setStage('llm');
+      setStageStatus('llm','running');
+      streamText.current='';
+      setStream('');
+      setPrompts(null);
+      const plannedDecisionBlock=[
+        'PLANNED GENERATION DECISION:',
+        'CHARACTER: '+generationPlan.character,
+        'ACTION: '+generationPlan.action,
+        'POSE: '+generationPlan.pose,
+        'SETTING: '+generationPlan.setting,
+        'BACKGROUND: '+generationPlan.background,
+        'EXPRESSION: '+generationPlan.expression,
+        'DRESS: '+generationPlan.dress,
+        'COMPOSITION: '+generationPlan.composition,
+        'LIGHTING: '+generationPlan.lighting,
+        'CAMERA: '+generationPlan.camera,
+        'FRAMING: '+generationPlan.framing,
+      ].join('\n');
+
       const userPrompt=renderPromptTemplate(
         generationDraft.userPromptTemplate,
-        promptTemplateValues,
-      );
+        planValues,
+      )+'\n\n'+plannedDecisionBlock+
+        '\n\nConvert this exact plan into deterministic comma-separated image tags. Do not invent a different pose, background, expression, lighting, camera or framing.';
 
       await streamLlm({
         settings:llm,
@@ -946,17 +1118,30 @@ function App(){
       });
 
       let rawPair=await apiInvoke<PromptPair>('parse_prompt_pair',{raw:streamText.current});
+      let validation=validateGeneratedPrompt(rawPair,prep.loras.flatMap(l=>l.activationTags));
+      let validationAttempt=0;
 
-      if(promptNeedsExpansion(rawPair)){
+      while((!validation.valid || promptNeedsExpansion(rawPair)) && validationAttempt<2){
+        validationAttempt+=1;
+        const deficiency=[
+          ...validation.errors,
+          ...(promptNeedsExpansion(rawPair) ? ['prompt does not contain enough scene coverage or visual detail'] : []),
+        ];
+        setTagValidation('TAG VALIDATION FAILED — REDO '+validationAttempt+'/2: '+deficiency.join(' · '));
         streamText.current='';
         flushSync(()=>setStream(''));
+
         const expansionUserPrompt=renderPromptTemplate(
           generationDraft.expansionPromptTemplate,
           {
-            ...promptTemplateValues,
+            ...planValues,
             PREVIOUS_JSON:JSON.stringify(rawPair),
           },
-        );
+        )+
+        '\n\nSTRICT VALIDATION FAILURE. REDO THE OUTPUT NOW.\n'+
+        deficiency.map(item=>'- '+item).join('\n')+
+        '\nRules: at least 24 positive comma-separated tags, 20-35 negative tags, ordinary tags must be 1-6 words and <=64 characters, no sentence-like tags, no prose, no metaphors, no narrative clauses. Preserve every documented activation prompt exactly. Return JSON only.';
+
         await streamLlm({
           settings:llm,
           systemPrompt:selectedSystemPrompt,
@@ -965,8 +1150,19 @@ function App(){
           streamText.current+=event;
           flushSync(()=>setStream(streamText.current));
         });
+
         rawPair=await apiInvoke<PromptPair>('parse_prompt_pair',{raw:streamText.current});
+        validation=validateGeneratedPrompt(rawPair,prep.loras.flatMap(l=>l.activationTags));
       }
+
+      if(!validation.valid || promptNeedsExpansion(rawPair)){
+        throw new Error(
+          'LLM prompt validation failed after 2 repair attempts: '+
+          [...validation.errors, ...(promptNeedsExpansion(rawPair) ? ['insufficient scene coverage'] : [])].join(' · ')
+        );
+      }
+
+      setTagValidation('TAG VALIDATION PASSED — '+validation.positiveTags.length+' positive / '+validation.negativeTags.length+' negative tags');
 
       const pair=await apiInvoke<PromptPair>('finalize_prompt_pair',{
         req:{promptPair:rawPair,loras:prep.loras},
@@ -1059,7 +1255,14 @@ function App(){
         model:llm.model,
         checkpoint:prep.checkpoint,
         loras:prep.loras,
-        scene:prep.scene,
+        scene:plan ? {
+          character:plan.character,
+          setting:plan.setting,
+          pose:plan.pose,
+          expression:plan.expression,
+          dress:plan.dress,
+          composition:plan.composition,
+        } : prep.scene,
         positivePrompt:pair.positive_prompt,
         negativePrompt:pair.negative_prompt,
         rationale:pair.rationale,
@@ -1103,6 +1306,9 @@ function App(){
     setSelectedId(id);
     setPrepared(null);
     setPrompts(null);
+    setPlan(null);
+    setPlanStream('');
+    setTagValidation('');
   }
 
   async function copy(text:string){
@@ -1172,14 +1378,28 @@ function App(){
       <button className={'rail-btn ' + (tab==='history' ? 'active' : '')} onClick={()=>{setTab('history');setSettingsOpen(false)}}><History size={15}/> HISTORY <span>{history.length}</span></button>
       <button className={'rail-btn ' + (settingsOpen ? 'active' : '')} onClick={()=>setSettingsOpen(v=>!v)}><Settings2 size={15}/> SETTINGS</button>
 
-      <div className="recent-heading">RECENT</div>
-      <div className="recent-images">
-        {history.filter(item=>item.imageDataUrl).slice(0,8).map(item=>
-          <button className="recent-image" key={item.id} onClick={()=>openHistory(item.id)} title={new Date(item.timestamp).toLocaleString()}>
-            <img src={item.imageDataUrl} alt=""/>
-          </button>
-        )}
-        {!history.some(item=>item.imageDataUrl) && <div className="recent-empty">NO IMAGES</div>}
+      <div className="showcase-heading">
+        <span>IMAGE SHOWCASE</span>
+        <span>{history.filter(item=>item.imageDataUrl).length}</span>
+      </div>
+      <div className="image-showcase">
+        <div className="showcase-main">
+          {(resultImage || history.find(item=>item.imageDataUrl)?.imageDataUrl)
+            ? <img src={resultImage || history.find(item=>item.imageDataUrl)?.imageDataUrl || ''} alt="Latest generated result"/>
+            : <div className="showcase-empty"><WandSparkles size={22}/><span>NO GENERATED IMAGE</span></div>}
+        </div>
+        <div className="showcase-meta">
+          <b>{resultFilename || history.find(item=>item.imageDataUrl)?.checkpoint.name || 'READY FOR GENERATION'}</b>
+          <span>{comfyStatus==='done' ? 'LATEST GENERATION' : selected?.name || 'SELECT A CHECKPOINT'}</span>
+        </div>
+        <div className="showcase-strip">
+          {history.filter(item=>item.imageDataUrl).slice(0,6).map(item=>
+            <button className="showcase-thumb" key={item.id} onClick={()=>openHistory(item.id)} title={new Date(item.timestamp).toLocaleString()}>
+              <img src={item.imageDataUrl} alt=""/>
+            </button>
+          )}
+          {!history.some(item=>item.imageDataUrl) && <div className="showcase-no-history">NO HISTORY</div>}
+        </div>
       </div>
 
       {webHost && <div className="host-box">
@@ -1213,10 +1433,33 @@ function App(){
             </div>
           </div>
 
-          <div className="stream-box">{stream
-            ? <pre>{stream}</pre>
-            : <div className="stream-placeholder"><Terminal size={18}/><span>Prompt output appears here.</span></div>}
+          <div className="planning-panel">
+            <div className="planning-head">
+              <span>LLM VISUAL PLAN</span>
+              {plan && <strong>LOCKED</strong>}
+            </div>
+            <div className="planning-stream-box">
+              {planStream ? <pre>{planStream}</pre> : <div className="stream-placeholder"><Terminal size={18}/><span>Planning decision will stream here first.</span></div>}
+            </div>
+            {plan && <div className="planning-grid">
+              <div><span>CHARACTER</span><b>{plan.character}</b></div>
+              <div><span>ACTION</span><b>{plan.action}</b></div>
+              <div><span>POSE</span><b>{plan.pose}</b></div>
+              <div><span>BACKGROUND</span><b>{plan.background}</b></div>
+              <div><span>EXPRESSION</span><b>{plan.expression}</b></div>
+              <div><span>DRESS</span><b>{plan.dress}</b></div>
+              <div><span>COMPOSITION</span><b>{plan.composition}</b></div>
+              <div><span>LIGHTING</span><b>{plan.lighting}</b></div>
+              <div><span>CAMERA</span><b>{plan.camera}</b></div>
+              <div><span>FRAMING</span><b>{plan.framing}</b></div>
+            </div>}
           </div>
+
+          <div className="stream-box tag-stream-box">{stream
+            ? <pre>{stream}</pre>
+            : <div className="stream-placeholder"><Terminal size={18}/><span>Deterministic image tags appear here after planning.</span></div>}
+          </div>
+          {tagValidation && <div className="tag-validation">{tagValidation}</div>}
 
           {prompts && <div className="prompt-result">
             <div className="prompt-block">

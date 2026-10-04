@@ -348,3 +348,82 @@ button,input,textarea,select{font-size:12px}
 .backend-section .full{width:100%}
 @media(max-width:1250px){.generate-layout{grid-template-columns:1fr}}
 @media(max-width:1150px){.right-rail{width:310px}.content{right:336px}}
+
+
+/* --- Larger typography + rebuilt left image showcase + planning UI --- */
+body{font-size:15px}
+.brand-title{font-size:17px}
+.rail-label,.kicker{font-size:12px}
+.rail-btn{font-size:13px;padding:12px 13px}
+.recent-heading,.showcase-heading{font-size:12px}
+.host-url{font-size:11px}
+.host-box button{font-size:11px}
+.stage-label{font-size:11px}
+.stage-index{font-size:10px}
+.panel-title{font-size:22px}
+.workspace-meta{font-size:12px}
+.workspace-meta span{font-size:11px;padding:7px 9px}
+.stream-box pre,.planning-stream-box pre{font-size:13px;line-height:1.62}
+.stream-placeholder{font-size:12px}
+.prompt-block-head{font-size:11px}
+.prompt-block-head button{font-size:11px}
+.prompt-text,.history-full-prompt{font-size:13px;line-height:1.7}
+.stack-head{font-size:12px}
+.stack-item b{font-size:12px}
+.stack-item small{font-size:11px}
+.stack-item strong{font-size:11px}
+.primary-btn,.secondary-btn{font-size:12px;padding:11px 14px}
+.right-section-head{font-size:12px}
+.search-row.compact input{font-size:12px}
+.checkpoint-row-copy b,.lora-row-copy b{font-size:12px}
+.checkpoint-row-copy span,.lora-row-copy span{font-size:11px}
+.checkpoint-row-copy small,.lora-row-copy small{font-size:10px}
+.compact-field span{font-size:10px}
+.compact-field input{font-size:12px}
+.error-box,.toast{font-size:12px}
+.history-detail-meta{font-size:11px}
+.history-section-title{font-size:11px}
+.history-grid span,.history-text-grid span{font-size:10px}
+.history-grid b,.history-text-grid b{font-size:12px}
+.history-code{font-size:11px}
+.history-model-header b{font-size:13px}
+.history-model-header span{font-size:11px}
+.history-lora-row b{font-size:11px}
+.history-lora-row span{font-size:10px}
+.history-list-item b,.history-list-item span{font-size:11px}
+.history-list-item small{font-size:10px}
+
+/* Left-side generated-image showcase */
+.showcase-heading{display:flex;justify-content:space-between;align-items:center;margin:13px 3px 6px;color:var(--muted);letter-spacing:.14em}
+.image-showcase{border:1px solid rgba(255,255,255,.17);background:rgba(0,0,0,.48);padding:8px}
+.showcase-main{width:100%;aspect-ratio:3/4;min-height:190px;border:1px solid var(--line2);background:#030606;overflow:hidden;display:grid;place-items:center}
+.showcase-main img{width:100%;height:100%;display:block;object-fit:contain;background:#000}
+.showcase-empty{height:100%;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:9px;color:var(--dim);font-size:10px;letter-spacing:.10em;text-align:center;padding:20px}
+.showcase-meta{padding:8px 2px 6px;min-width:0}
+.showcase-meta b{display:block;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.showcase-meta span{display:block;font-size:10px;color:var(--dim);margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.showcase-strip{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:5px}
+.showcase-thumb{aspect-ratio:1/1;border:1px solid var(--line2);padding:0;background:rgba(0,0,0,.35);overflow:hidden}
+.showcase-thumb:hover{border-color:rgba(255,255,255,.7);transform:translateY(-1px)}
+.showcase-thumb img{width:100%;height:100%;display:block;object-fit:cover}
+.showcase-no-history{grid-column:1/-1;border:1px dashed var(--line2);padding:12px;text-align:center;color:var(--dim);font-size:10px;letter-spacing:.1em}
+
+/* Planning stage and validation status */
+.planning-panel{border:1px solid var(--line2);background:rgba(0,0,0,.40);margin-top:12px;padding:10px}
+.planning-head{display:flex;justify-content:space-between;align-items:center;font-size:12px;letter-spacing:.12em;color:var(--muted)}
+.planning-head strong{font-size:10px;border:1px solid rgba(255,255,255,.3);padding:4px 7px;color:#fff}
+.planning-stream-box{margin-top:8px;min-height:92px;max-height:155px;overflow:auto;border:1px solid var(--line2);background:rgba(0,0,0,.42);padding:9px}
+.planning-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px;margin-top:8px}
+.planning-grid>div{border:1px solid var(--line2);background:rgba(255,255,255,.025);padding:7px;min-width:0}
+.planning-grid span{display:block;font-size:9px;color:var(--dim);letter-spacing:.08em}
+.planning-grid b{display:block;margin-top:4px;font-size:11px;line-height:1.35;overflow-wrap:anywhere}
+.tag-stream-box{margin-top:10px}
+.tag-validation{margin-top:7px;border:1px solid var(--line2);background:rgba(255,255,255,.035);padding:8px 10px;font-size:11px;line-height:1.45;color:var(--muted)}
+
+@media(max-width:1150px){
+  .showcase-main{aspect-ratio:4/5;min-height:160px}
+}
+@media(max-width:920px){
+  .showcase-main{aspect-ratio:16/10;min-height:130px}
+  .planning-grid{grid-template-columns:1fr}
+}
