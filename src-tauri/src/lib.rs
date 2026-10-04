@@ -1595,7 +1595,7 @@ async fn web_command(
         }
         "get_host_llm_config"=>{
             let settings = state.llm.lock().await.clone();
-            let generation_settings=public_generation_settings(&state.generation_settings.lock().await);
+            let generation_settings=public_generation_settings(&*state.generation_settings.lock().await);
             serde_json::to_value(json!({
                 "provider": settings.provider,
                 "baseUrl": settings.base_url,
@@ -1604,7 +1604,7 @@ async fn web_command(
             })).map_err(|e|e.to_string())
         }
         "get_host_generation_settings"=>{
-            let generation_settings=public_generation_settings(&state.generation_settings.lock().await);
+            let generation_settings=public_generation_settings(&*state.generation_settings.lock().await);
             serde_json::to_value(generation_settings).map_err(|e|e.to_string())
         }
         "update_web_host_generation_settings"=>{
