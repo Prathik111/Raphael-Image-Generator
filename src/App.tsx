@@ -84,14 +84,14 @@ Return JSON only:
   "negative_prompt": ""
 }
 
-The positive prompt must contain at least 24 meaningful comma-separated visual tags or short phrases and target approximately 90-160 words.
+The positive prompt must contain at least {{MIN_POSITIVE_TAGS}} meaningful comma-separated visual tags or short phrases and target approximately 90-160 words.
 Use literal canonical visual terms, mostly 1-6 words per tag.
 Do not write sentences, narrative prose, metaphors, storytelling, or poetic language.
 Do not invent a different pose, action, background, expression, lighting, camera, framing, or composition from the locked plan.
 
 Cover the subject identity and visible appearance, current action/state, pose, hands and arms when relevant, head direction, gaze, facial expression, clothing and accessories, interaction, setting, background, atmosphere, composition, perspective, depth, lighting, camera viewpoint, framing, materials, and useful finishing details.
 
-The negative prompt must contain 20-35 concrete comma-separated failure tags targeted to the image.
+The negative prompt must contain between {{MIN_NEGATIVE_TAGS}} and 35 concrete comma-separated failure tags targeted to the image.
 Do not mention checkpoint names, filenames, model implementation syntax, or LoRA syntax.
 
 Every documented activation prompt supplied in the user message must be preserved exactly, unchanged, at least once, and placed next to the visual concept it controls.
@@ -111,8 +111,8 @@ Return JSON only:
 }
 
 Fix every validation problem explicitly reported in the user message.
-The positive prompt must contain at least 24 meaningful comma-separated visual tags and target approximately 90-160 words.
-The negative prompt must contain 20-35 concrete comma-separated failure tags.
+The positive prompt must contain at least {{MIN_POSITIVE_TAGS}} meaningful comma-separated visual tags and target approximately 90-160 words.
+The negative prompt must contain between {{MIN_NEGATIVE_TAGS}} and 35 concrete comma-separated failure tags.
 Ordinary tags must be 1-6 words and no more than 64 characters.
 Do not use sentence-like tags, prose, metaphors, narrative clauses, or explanations.
 
@@ -187,6 +187,9 @@ PREVIOUS JSON:
 {{PREVIOUS_JSON}}`;
 
 const generationSettingsStorageKey = 'raphael-image-generator.generation-settings.v2';
+const defaultMinPositiveTags = 24;
+const defaultMinNegativeTags = 20;
+const maxNegativeTags = 35;
 
 interface StoredGenerationSettings {
   llm?: LlmSettings;
@@ -206,6 +209,8 @@ interface StoredGenerationSettings {
   plannerSystemPrompt?: string;
   tagSystemPrompt?: string;
   repairSystemPrompt?: string;
+  minPositiveTags?: number;
+  minNegativeTags?: number;
   manualLoraIds?: string[];
 }
 
@@ -242,6 +247,24 @@ function loadPersistedGenerationSettings(): StoredGenerationSettings {
       typeof migrated.repairSystemPrompt==='string' && migrated.repairSystemPrompt.trim()
         ? migrated.repairSystemPrompt
         : defaultRepairSystemPrompt;
+
+    if(typeof migrated.tagSystemPrompt==='string'
+      && migrated.tagSystemPrompt.includes('You are the TAG GENERATION MODEL')
+      && !migrated.tagSystemPrompt.includes('{{MIN_POSITIVE_TAGS}}')){
+      migrated.tagSystemPrompt=migrated.tagSystemPrompt
+        .replace(/at least 24 meaningful/gi,'at least {{MIN_POSITIVE_TAGS}} meaningful')
+        .replace(/20-35 concrete/gi,'between {{MIN_NEGATIVE_TAGS}} and 35 concrete');
+    }
+    if(typeof migrated.repairSystemPrompt==='string'
+      && migrated.repairSystemPrompt.includes('You are the TAG REPAIRER')
+      && !migrated.repairSystemPrompt.includes('{{MIN_POSITIVE_TAGS}}')){
+      migrated.repairSystemPrompt=migrated.repairSystemPrompt
+        .replace(/at least 24 meaningful/gi,'at least {{MIN_POSITIVE_TAGS}} meaningful')
+        .replace(/20-35 concrete/gi,'between {{MIN_NEGATIVE_TAGS}} and 35 concrete');
+    }
+
+    migrated.minPositiveTags=Math.max(1,Math.min(100,migrated.minPositiveTags ?? defaultMinPositiveTags));
+    migrated.minNegativeTags=Math.max(1,Math.min(maxNegativeTags,migrated.minNegativeTags ?? defaultMinNegativeTags));
 
     return migrated;
   }catch{
@@ -493,15 +516,20 @@ function splitPromptTags(value:string):string[]{
   return value.split(',').map(tag=>tag.trim()).filter(Boolean);
 }
 
-function validateGeneratedPrompt(pair:PromptPair,activationTags:string[]):PromptValidation{
+function validateGeneratedPrompt(
+  pair:PromptPair,
+  activationTags:string[],
+  minPositiveTags:number,
+  minNegativeTags:number,
+):PromptValidation{
   const positiveTags=splitPromptTags(pair.positive_prompt);
   const negativeTags=splitPromptTags(pair.negative_prompt);
   const exactActivationTags=new Set(activationTags.map(tag=>tag.trim()).filter(Boolean));
   const errors:string[]=[];
 
-  if(positiveTags.length<24) errors.push(`positive prompt has only ${positiveTags.length} tags; minimum is 24`);
-  if(negativeTags.length<20) errors.push(`negative prompt has only ${negativeTags.length} tags; minimum is 20`);
-  if(negativeTags.length>35) errors.push(`negative prompt has ${negativeTags.length} tags; maximum is 35`);
+  if(positiveTags.length<minPositiveTags) errors.push(`positive prompt has only ${positiveTags.length} tags; minimum is ${minPositiveTags}`);
+  if(negativeTags.length<minNegativeTags) errors.push(`negative prompt has only ${negativeTags.length} tags; minimum is ${minNegativeTags}`);
+  if(negativeTags.length>maxNegativeTags) errors.push(`negative prompt has ${negativeTags.length} tags; maximum is ${maxNegativeTags}`);
 
   const validateTagList=(tags:string[],label:string,allowExactActivation:boolean)=>{
     tags.forEach((tag,index)=>{
@@ -692,6 +720,12 @@ function App(){
   const [steps,setSteps]=useState(persistedGenerationSettings.steps || 28);
   const [cfg,setCfg]=useState(persistedGenerationSettings.cfg ?? 6.5);
   const [sampler,setSampler]=useState(persistedGenerationSettings.sampler || 'euler');
+  const [minPositiveTags,setMinPositiveTags]=useState(
+    Math.max(1,Math.min(100,persistedGenerationSettings.minPositiveTags ?? defaultMinPositiveTags)),
+  );
+  const [minNegativeTags,setMinNegativeTags]=useState(
+    Math.max(1,Math.min(maxNegativeTags,persistedGenerationSettings.minNegativeTags ?? defaultMinNegativeTags)),
+  );
 
   const [prepared,setPrepared]=useState<PreparedGeneration|null>(null);
   const [prompts,setPrompts]=useState<PromptPair|null>(null);
@@ -736,6 +770,8 @@ function App(){
     repairSystemPrompt:persistedGenerationSettings.repairSystemPrompt || defaultRepairSystemPrompt,
     userPromptTemplate:persistedGenerationSettings.userPromptTemplate || defaultUserPromptTemplate,
     expansionPromptTemplate:persistedGenerationSettings.expansionPromptTemplate || defaultExpansionPromptTemplate,
+    minPositiveTags:Math.max(1,Math.min(100,persistedGenerationSettings.minPositiveTags ?? defaultMinPositiveTags)),
+    minNegativeTags:Math.max(1,Math.min(maxNegativeTags,persistedGenerationSettings.minNegativeTags ?? defaultMinNegativeTags)),
   });
   const [selectedHistoryId,setSelectedHistoryId]=useState('');
   const [historySettingsVisible,setHistorySettingsVisible]=useState(false);
@@ -926,6 +962,8 @@ function App(){
     const normalizedDraft={
       ...draft,
       maxLoras:cappedMax,
+      minPositiveTags:Math.max(1,Math.min(100,Number(draft.minPositiveTags) || defaultMinPositiveTags)),
+      minNegativeTags:Math.max(1,Math.min(maxNegativeTags,Number(draft.minNegativeTags) || defaultMinNegativeTags)),
       randomLoraMin:nextConstraints.randomLoraMin,
       randomLoraMax:nextConstraints.randomLoraMax,
       constraints:nextConstraints,
@@ -946,6 +984,8 @@ function App(){
     setSteps(normalizedDraft.steps);
     setCfg(normalizedDraft.cfg);
     setSampler(normalizedDraft.sampler);
+    setMinPositiveTags(normalizedDraft.minPositiveTags);
+    setMinNegativeTags(normalizedDraft.minNegativeTags);
     try{
       window.localStorage.setItem(
         generationSettingsStorageKey,
@@ -1138,17 +1178,22 @@ function App(){
       // Each LLM stage has its own editable system prompt.
       // The selected demographic policy is inserted into the stage prompt.
       const selectedDemographicPolicy = demographicPrompts[demographic];
+      const systemPromptValues={
+        DEMOGRAPHIC_POLICY:selectedDemographicPolicy,
+        MIN_POSITIVE_TAGS:String(generationDraft.minPositiveTags),
+        MIN_NEGATIVE_TAGS:String(generationDraft.minNegativeTags),
+      };
       const plannerSystemPrompt = renderPromptTemplate(
         generationDraft.plannerSystemPrompt,
-        {DEMOGRAPHIC_POLICY:selectedDemographicPolicy},
+        systemPromptValues,
       );
       const tagSystemPrompt = renderPromptTemplate(
         generationDraft.tagSystemPrompt,
-        {DEMOGRAPHIC_POLICY:selectedDemographicPolicy},
+        systemPromptValues,
       );
       const repairSystemPrompt = renderPromptTemplate(
         generationDraft.repairSystemPrompt,
-        {DEMOGRAPHIC_POLICY:selectedDemographicPolicy},
+        systemPromptValues,
       );
 
       const basePromptValues={
@@ -1233,7 +1278,12 @@ function App(){
       });
 
       let rawPair=await apiInvoke<PromptPair>('parse_prompt_pair',{raw:streamText.current});
-      let validation=validateGeneratedPrompt(rawPair,prep.loras.flatMap(l=>l.activationTags));
+      let validation=validateGeneratedPrompt(
+        rawPair,
+        prep.loras.flatMap(l=>l.activationTags),
+        generationDraft.minPositiveTags,
+        generationDraft.minNegativeTags,
+      );
       let validationAttempt=0;
 
       while((!validation.valid || promptNeedsExpansion(rawPair)) && validationAttempt<2){
@@ -1255,7 +1305,7 @@ function App(){
         )+
         '\n\nSTRICT VALIDATION FAILURE. REDO THE OUTPUT NOW.\n'+
         deficiency.map(item=>'- '+item).join('\n')+
-        '\nRules: at least 24 positive comma-separated tags, 20-35 negative tags, ordinary tags must be 1-6 words and <=64 characters, no sentence-like tags, no prose, no metaphors, no narrative clauses. Preserve every documented activation prompt exactly. Return JSON only.';
+        '\nRules: at least '+generationDraft.minPositiveTags+' positive comma-separated tags, between '+generationDraft.minNegativeTags+' and '+maxNegativeTags+' negative tags, ordinary tags must be 1-6 words and <=64 characters, no sentence-like tags, no prose, no metaphors, no narrative clauses. Preserve every documented activation prompt exactly. Return JSON only.';
 
         await streamLlm({
           settings:llm,
@@ -1267,7 +1317,12 @@ function App(){
         });
 
         rawPair=await apiInvoke<PromptPair>('parse_prompt_pair',{raw:streamText.current});
-        validation=validateGeneratedPrompt(rawPair,prep.loras.flatMap(l=>l.activationTags));
+        validation=validateGeneratedPrompt(
+          rawPair,
+          prep.loras.flatMap(l=>l.activationTags),
+          generationDraft.minPositiveTags,
+          generationDraft.minNegativeTags,
+        );
       }
 
       if(!validation.valid || promptNeedsExpansion(rawPair)){
@@ -1365,6 +1420,8 @@ function App(){
         steps,
         cfg,
         sampler,
+        minPositiveTags:generationDraft.minPositiveTags,
+        minNegativeTags:generationDraft.minNegativeTags,
       };
       const record:GenerationRecord={
         id:crypto.randomUUID(),
@@ -1861,12 +1918,16 @@ function App(){
                   <span>SYSTEM PROMPT TEMPLATE</span>
                   <textarea className="settings-textarea system-prompt-editor" value={generationDraft[key]} onChange={e=>setGenerationDraft(d=>({...d,[key]:e.target.value}))}/>
                 </label>
-                <div className="settings-helper">{'Placeholder: {{DEMOGRAPHIC_POLICY}}'}</div>
+                <div className="settings-helper">{'Placeholders: {{DEMOGRAPHIC_POLICY}}, {{MIN_POSITIVE_TAGS}}, {{MIN_NEGATIVE_TAGS}}'}</div>
                 <label className="settings-field settings-field-full">
                   <span>EFFECTIVE SYSTEM PROMPT · SENT TO MODEL</span>
                   <textarea
                     className="settings-textarea system-prompt-preview"
-                    value={renderPromptTemplate(generationDraft[key],{DEMOGRAPHIC_POLICY:generationDraft.demographicPrompts[generationDraft.demographic]})}
+                    value={renderPromptTemplate(generationDraft[key],{
+                      DEMOGRAPHIC_POLICY:generationDraft.demographicPrompts[generationDraft.demographic],
+                      MIN_POSITIVE_TAGS:String(generationDraft.minPositiveTags),
+                      MIN_NEGATIVE_TAGS:String(generationDraft.minNegativeTags),
+                    })}
                     readOnly
                   />
                 </label>
@@ -1915,6 +1976,37 @@ function App(){
           </div>}
 
           {settingsTab==='output' && <div className="settings-tab-panel">
+            <section className="settings-section settings-card">
+              <div className="settings-section-title">TAG VALIDATION</div>
+              <div className="settings-helper">Minimum comma-separated tags required before a prompt can be sent to ComfyUI. Negative tags have a fixed maximum of {maxNegativeTags}.</div>
+              <div className="settings-form-grid">
+                <label className="settings-field settings-number-field">
+                  <span>MINIMUM POSITIVE TAGS</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={100}
+                    step={1}
+                    value={generationDraft.minPositiveTags}
+                    onChange={e=>setGenerationDraft(d=>({...d,minPositiveTags:Math.max(1,Math.min(100,Number(e.target.value)||1))}))}
+                  />
+                  <small>Default: {defaultMinPositiveTags}</small>
+                </label>
+                <label className="settings-field settings-number-field">
+                  <span>MINIMUM NEGATIVE TAGS</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={maxNegativeTags}
+                    step={1}
+                    value={generationDraft.minNegativeTags}
+                    onChange={e=>setGenerationDraft(d=>({...d,minNegativeTags:Math.max(1,Math.min(maxNegativeTags,Number(e.target.value)||1))}))}
+                  />
+                  <small>Default: {defaultMinNegativeTags} · maximum: {maxNegativeTags}</small>
+                </label>
+              </div>
+            </section>
+
             <section className="settings-section settings-card">
               <div className="settings-section-title">LoRA SELECTION LIMITS</div>
               <div className="settings-form-grid">
