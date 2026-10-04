@@ -1834,7 +1834,7 @@ function App(){
                   <span>SYSTEM PROMPT TEMPLATE</span>
                   <textarea className="settings-textarea system-prompt-editor" value={generationDraft[key]} onChange={e=>setGenerationDraft(d=>({...d,[key]:e.target.value}))}/>
                 </label>
-                <div className="settings-helper">Placeholder: {{DEMOGRAPHIC_POLICY}}</div>
+                <div className="settings-helper">{'Placeholder: {{DEMOGRAPHIC_POLICY}}'}</div>
                 <label className="settings-field settings-field-full">
                   <span>EFFECTIVE SYSTEM PROMPT · SENT TO MODEL</span>
                   <textarea
@@ -1855,7 +1855,7 @@ function App(){
                 <span>PRIMARY USER PROMPT TEMPLATE · EDITABLE</span>
                 <textarea className="settings-textarea prompt-template-editor" value={generationDraft.userPromptTemplate} onChange={e=>setGenerationDraft(d=>({...d,userPromptTemplate:e.target.value}))}/>
               </label>
-              <div className="settings-helper">Placeholders: {{CHECKPOINT}}, {{BASE}}, {{COMPATIBILITY}}, {{LORA_METADATA}}, {{CHARACTER}}, {{SETTING}}, {{POSE}}, {{EXPRESSION}}, {{DRESS}}, {{COMPOSITION}}, {{EXTRA}}</div>
+              <div className="settings-helper">{'Placeholders: {{CHECKPOINT}}, {{BASE}}, {{COMPATIBILITY}}, {{LORA_METADATA}}, {{CHARACTER}}, {{SETTING}}, {{POSE}}, {{EXPRESSION}}, {{DRESS}}, {{COMPOSITION}}, {{EXTRA}}'}</div>
             </section>
 
             <section className="settings-section settings-card">
@@ -1865,7 +1865,7 @@ function App(){
                 <span>REPAIR USER PROMPT TEMPLATE · EDITABLE</span>
                 <textarea className="settings-textarea prompt-template-editor" value={generationDraft.expansionPromptTemplate} onChange={e=>setGenerationDraft(d=>({...d,expansionPromptTemplate:e.target.value}))}/>
               </label>
-              <div className="settings-helper">Placeholder: {{PREVIOUS_JSON}} plus the same scene/model placeholders as the primary template.</div>
+              <div className="settings-helper">{'Placeholder: {{PREVIOUS_JSON}} plus the same scene/model placeholders as the primary template.'}</div>
             </section>
           </div>}
 
