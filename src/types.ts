@@ -126,6 +126,8 @@ export interface GenerationSettings {
   steps: number;
   cfg: number;
   sampler: string;
+  minPositiveTags: number;
+  minNegativeTags: number;
 }
 
 export interface WebHostInfo {
