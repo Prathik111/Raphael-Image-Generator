@@ -726,7 +726,10 @@ function App(){
     setCfg(normalizedDraft.cfg);
     setSampler(normalizedDraft.sampler);
     try{
-      window.localStorage.setItem(generationSettingsStorageKey,JSON.stringify(normalizedDraft));
+      window.localStorage.setItem(
+        generationSettingsStorageKey,
+        JSON.stringify({...normalizedDraft,manualLoraIds}),
+      );
       window.localStorage.setItem(demographicPromptsStorageKey,JSON.stringify(normalizedDraft.demographicPrompts));
     }catch{}
   },[generationDraft]);
