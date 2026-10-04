@@ -1701,6 +1701,30 @@ function App(){
           </section>
 
           <section className="settings-section">
+            <div className="settings-section-title">EFFECTIVE SYSTEM PROMPTS</div>
+            <div className="settings-note">
+              These are the exact system prompts currently sent to the selected LLM for each phase.
+              Both phases use the selected demographic system prompt; their user prompts are different.
+            </div>
+            <label className="wide-field">
+              <span>PLANNER SYSTEM PROMPT · SENT EXACTLY TO PLANNER MODEL</span>
+              <textarea
+                className="settings-textarea prompt-template-editor"
+                value={generationDraft.demographicPrompts[generationDraft.demographic]}
+                readOnly
+              />
+            </label>
+            <label className="wide-field">
+              <span>TAG-REPAIR SYSTEM PROMPT · SENT EXACTLY WHEN TAG VALIDATION FAILS</span>
+              <textarea
+                className="settings-textarea prompt-template-editor"
+                value={generationDraft.demographicPrompts[generationDraft.demographic]}
+                readOnly
+              />
+            </label>
+          </section>
+
+          <section className="settings-section">
             <div className="settings-section-title">LLM USER PROMPTS</div>
             <label className="wide-field">
               <span>PRIMARY USER PROMPT · EDITABLE</span>
