@@ -23,6 +23,7 @@ use tokio::time::{sleep, timeout};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tokio_stream::{wrappers::UnboundedReceiverStream, Stream};
 use tower_http::services::ServeDir;
+use local_ip_address::local_ip;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1529,14 +1530,14 @@ async fn monitor_comfy_generation(
 }
 
 
-fn lan_ip() -> String {
-    std::net::UdpSocket::bind("0.0.0.0:0")
-        .and_then(|socket| {
-            let _ = socket.connect("8.8.8.8:80");
-            socket.local_addr()
-        })
-        .map(|addr| addr.ip().to_string())
-        .unwrap_or_else(|_| "127.0.0.1".into())
+fn lan_ip() -> Result<String,String> {
+    let address = local_ip()
+        .map_err(|error| format!("Could not determine the local LAN IPv4 address: {error}"))?;
+    match address {
+        std::net::IpAddr::V4(ip) if ip.is_private() || ip.is_link_local() => Ok(ip.to_string()),
+        std::net::IpAddr::V4(ip) => Err(format!("Local address {ip} is not a private LAN address. Connect the computer and mobile device to the same private network and try again.")),
+        std::net::IpAddr::V6(ip) => Err(format!("Local address {ip} is IPv6-only. A private IPv4 LAN address is required for the current mobile web host.")),
+    }
 }
 
 fn dist_directory(app:&AppHandle)->Option<PathBuf>{
@@ -1772,15 +1773,10 @@ async fn start_web_host(
     }
 
     let chosen_port=port.unwrap_or(1424);
-    let lan_host=lan_ip();
-    let parsed_lan_host=lan_host.parse::<std::net::Ipv4Addr>().ok();
-    let lan_only=parsed_lan_host.map(|ip| ip.is_private() || ip.is_link_local()).unwrap_or(false);
-    if !lan_only{
-        return Err("No private LAN IPv4 address was detected. Connect the computer to the same local network and try again.".into());
-    }
-    let listener=tokio::net::TcpListener::bind((lan_host.as_str(),chosen_port))
+    let lan_host=lan_ip()?;
+    let listener=tokio::net::TcpListener::bind(("0.0.0.0",chosen_port))
         .await
-        .map_err(|e|format!("LAN host could not bind {}:{}: {}",lan_host,chosen_port,e))?;
+        .map_err(|e|format!("LAN host could not bind 0.0.0.0:{}: {}",chosen_port,e))?;
     let actual_port=listener.local_addr().map_err(|e|e.to_string())?.port();
     let dist=dist_directory(&app).ok_or("Could not find dist/index.html. Run npm run build first.")?;
     let llm = Arc::new(Mutex::new(llm_settings.unwrap_or_else(|| LlmSettings {
@@ -1794,6 +1790,9 @@ async fn start_web_host(
     })));
     let api_state=WebApiState{app:app.clone(),llm:llm.clone()};
     let router=Router::new()
+        .route("/health", axum::routing::get(|| async {
+            AxumJson(json!({"ok":true,"service":"raphael-prompt-forge"}))
+        }))
         .route("/api/{command}",post(web_command))
         .fallback_service(ServeDir::new(dist))
         .with_state(api_state);
