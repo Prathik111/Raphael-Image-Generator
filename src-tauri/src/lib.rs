@@ -244,6 +244,7 @@ struct RegistryVersion {
 
 #[derive(Debug, Clone, Deserialize)]
 struct RegistryFile {
+    id: String,
     version_id: Option<String>,
     path: String,
     relative_path: Option<String>,
@@ -509,7 +510,7 @@ async fn hydrate_registry_model(
     base_url: &str,
     token: &str,
     comfy_root: Option<&Path>,
-) -> Result<Option<ModelInfo>, String> {
+) -> Result<Vec<ModelInfo>, String> {
     let encoded = urlencoding::encode(&model.id);
     let versions_path = format!("/api/v1/models/{encoded}/versions");
     let files_path = format!("/api/v1/models/{encoded}/files");
@@ -521,37 +522,28 @@ async fn hydrate_registry_model(
     let assets_future = registry_json::<Vec<RegistryAsset>>(base_url, token, &assets_path);
     let (versions, files, tags, assets) = tokio::join!(versions_future, files_future, tags_future, assets_future);
     let versions = versions.unwrap_or_default();
-    let files = files.unwrap_or_default();
     let tags = tags.unwrap_or_default();
     let assets = assets.unwrap_or_default();
 
-    let latest_version = versions.first();
-    let base_model = latest_version.and_then(|version| version.base_model.clone()).or_else(|| model.base_model.clone());
-    let activation_tags = latest_version.map(|version| version.activation_prompts.clone()).unwrap_or_default();
-    let preferred_version_id = latest_version.map(|version| version.id.as_str());
-
-    let selected_file = files.iter()
+    // A Registry model is a metadata container and may own multiple installed
+    // files/versions. The Image Generator must represent each available file
+    // separately; otherwise two installed variants with the same display name
+    // collapse into one selectable model.
+    let available_files: Vec<&RegistryFile> = files
+        .iter()
         .filter(|file| file.status.eq_ignore_ascii_case("available"))
-        .filter(|file| preferred_version_id.is_none() || file.version_id.as_deref() == preferred_version_id)
-        .find_map(|file| registry_model_file_path(file, comfy_root))
-        .or_else(|| files.iter()
-            .filter(|file| file.status.eq_ignore_ascii_case("available"))
-            .find_map(|file| registry_model_file_path(file, comfy_root)));
+        .collect();
 
-    let file_path = selected_file.unwrap_or_else(|| PathBuf::from(&model.name));
+    // Model records with no remaining Registry files are intentionally hidden.
+    // Model Manager deletes files first and may leave the metadata container
+    // behind, so treating an empty model as a real image model would resurrect
+    // deleted entries using the model name as a fake path.
+    if available_files.is_empty() {
+        return Ok(Vec::new());
+    }
 
-    let size = files.iter()
-        .find(|file| registry_model_file_path(file, comfy_root).as_deref() == Some(file_path.as_path()))
-        .map(|file| file.size_bytes.max(0) as u64)
-        .unwrap_or(0);
+    let latest_version = versions.first();
 
-    // Registry supports thumbnail, cover, preview and gallery assets. Prefer
-    // the dedicated thumbnail/cover records, then fall back to preview/gallery
-    // for older Registry projections that did not classify the cached image as
-    // a thumbnail yet.
-    // Keep every usable Registry image asset as a fallback candidate.
-    // Older model records can have a stale thumbnail row while a preview or
-    // gallery asset is still valid.
     let mut thumbnail_candidates = Vec::new();
     for kind in ["thumbnail", "cover", "preview", "gallery"] {
         thumbnail_candidates.extend(
@@ -563,20 +555,48 @@ async fn hydrate_registry_model(
     let thumbnail = (!thumbnail_candidates.is_empty())
         .then(|| thumbnail_candidates.join("|"));
 
-    Ok(Some(ModelInfo {
-        id: model.id,
-        name: model.name,
-        kind: model.model_type,
-        path: file_path.to_string_lossy().to_string(),
-        size,
-        base_model,
-        tags: tags.clone(),
-        activation_tags,
-        character: tags.iter().any(|tag| norm(tag) == "character"),
-        thumbnail,
-        source: "raphael-registry".into(),
-        description: model.description,
-    }))
+    let mut result = Vec::with_capacity(available_files.len());
+
+    for file in available_files {
+        let file_path = match registry_model_file_path(file, comfy_root) {
+            Some(path) => path,
+            None => continue,
+        };
+
+        let selected_version = file
+            .version_id
+            .as_deref()
+            .and_then(|version_id| versions.iter().find(|version| version.id == version_id))
+            .or(latest_version);
+
+        let base_model = selected_version
+            .and_then(|version| version.base_model.clone())
+            .or_else(|| model.base_model.clone());
+
+        let activation_tags = selected_version
+            .map(|version| version.activation_prompts.clone())
+            .unwrap_or_default();
+
+        result.push(ModelInfo {
+            // File identity, not display name, is the selectable identity.
+            // Include the Registry model ID so the ID remains globally tied to
+            // its canonical metadata record while still distinguishing files.
+            id: format!("{}::file:{}", model.id, file.id),
+            name: model.name.clone(),
+            kind: model.model_type.clone(),
+            path: file_path.to_string_lossy().to_string(),
+            size: file.size_bytes.max(0) as u64,
+            base_model,
+            tags: tags.clone(),
+            activation_tags,
+            character: tags.iter().any(|tag| norm(tag) == "character"),
+            thumbnail: thumbnail.clone(),
+            source: "raphael-registry".into(),
+            description: model.description.clone(),
+        });
+    }
+
+    Ok(result)
 }
 
 async fn scan_registry_library(req: &ScanRequest) -> Result<LibrarySnapshot, String> {
@@ -649,8 +669,7 @@ async fn scan_registry_library(req: &ScanRequest) -> Result<LibrarySnapshot, Str
         tokio::pin!(hydrated);
         while let Some(result) = hydrated.next().await {
             match result {
-                Ok(Some(model)) => checkpoints.push(model),
-                Ok(None) => {}
+                Ok(models) => checkpoints.extend(models),
                 Err(_) => hydration_failures += 1,
             }
         }
@@ -670,15 +689,24 @@ async fn scan_registry_library(req: &ScanRequest) -> Result<LibrarySnapshot, Str
         tokio::pin!(hydrated);
         while let Some(result) = hydrated.next().await {
             match result {
-                Ok(Some(model)) => loras.push(model),
-                Ok(None) => {}
+                Ok(models) => loras.extend(models),
                 Err(_) => hydration_failures += 1,
             }
         }
     }
 
-    checkpoints.sort_by_key(|model| model.name.to_lowercase());
-    loras.sort_by_key(|model| model.name.to_lowercase());
+    checkpoints.sort_by(|a, b| {
+        a.name.to_lowercase()
+            .cmp(&b.name.to_lowercase())
+            .then_with(|| a.base_model.clone().unwrap_or_default().to_lowercase().cmp(&b.base_model.clone().unwrap_or_default().to_lowercase()))
+            .then_with(|| a.path.to_lowercase().cmp(&b.path.to_lowercase()))
+    });
+    loras.sort_by(|a, b| {
+        a.name.to_lowercase()
+            .cmp(&b.name.to_lowercase())
+            .then_with(|| a.base_model.clone().unwrap_or_default().to_lowercase().cmp(&b.base_model.clone().unwrap_or_default().to_lowercase()))
+            .then_with(|| a.path.to_lowercase().cmp(&b.path.to_lowercase()))
+    });
 
     let mut warnings = Vec::new();
     if checkpoint_models.is_empty() {
