@@ -195,6 +195,8 @@ const defaultMaxTagLength = 64;
 const absoluteMaxTagLength = 256;
 const defaultPlannerTemperature = 0.35;
 const defaultTagTemperature = 0.72;
+const defaultMaxCharacterLoras = 1;
+const absoluteMaxLoraLimit = 16;
 
 interface StoredGenerationSettings {
   llm?: LlmSettings;
@@ -220,6 +222,7 @@ interface StoredGenerationSettings {
   maxTagLength?: number;
   plannerTemperature?: number;
   tagTemperature?: number;
+  maxCharacterLoras?: number;
   manualLoraIds?: string[];
 }
 
@@ -790,6 +793,7 @@ function App(){
     maxTagLength:Math.max(1,Math.min(absoluteMaxTagLength,persistedGenerationSettings.maxTagLength ?? defaultMaxTagLength)),
     plannerTemperature:Math.max(0,Math.min(2,persistedGenerationSettings.plannerTemperature ?? defaultPlannerTemperature)),
     tagTemperature:Math.max(0,Math.min(2,persistedGenerationSettings.tagTemperature ?? defaultTagTemperature)),
+    maxCharacterLoras:Math.max(1,Math.min(absoluteMaxLoraLimit,persistedGenerationSettings.maxCharacterLoras ?? defaultMaxCharacterLoras)),
   });
   const [selectedHistoryId,setSelectedHistoryId]=useState('');
   const [historySettingsVisible,setHistorySettingsVisible]=useState(false);
@@ -830,6 +834,14 @@ function App(){
   const manualLoras=useMemo(
     ()=>allLoras.filter(lora=>manualLoraIds.includes(lora.id)),
     [allLoras,manualLoraIds],
+  );
+
+  const selectedCharacterLoraCount=useMemo(
+    ()=>selectedLoraIds.reduce((count,id)=>{
+      const lora=allLoras.find(item=>item.id===id);
+      return count+(lora && (lora.character || lora.tags.some(tag=>normUi(tag)==='character')) ? 1 : 0);
+    },0),
+    [allLoras,selectedLoraIds],
   );
 
   const filteredCheckpoints=useMemo(()=>{
@@ -971,7 +983,7 @@ function App(){
 
   useEffect(()=>{
     const draft=generationDraft;
-    const cappedMax=Math.max(1,Math.min(16,draft.maxLoras));
+    const cappedMax=Math.max(1,Math.min(absoluteMaxLoraLimit,draft.maxLoras));
     const nextConstraints={
       ...draft.constraints,
       randomLoraMin:Math.max(1,Math.min(cappedMax,draft.randomLoraMin)),
@@ -984,6 +996,7 @@ function App(){
       maxTagLength:Math.max(1,Math.min(absoluteMaxTagLength,Number(draft.maxTagLength) || defaultMaxTagLength)),
       plannerTemperature:Math.max(0,Math.min(2,Number(draft.plannerTemperature) || 0)),
       tagTemperature:Math.max(0,Math.min(2,Number(draft.tagTemperature) || 0)),
+      maxCharacterLoras:Math.max(1,Math.min(cappedMax,Number(draft.maxCharacterLoras) || defaultMaxCharacterLoras)),
       minPositiveTags:Math.max(1,Math.min(100,Number(draft.minPositiveTags) || defaultMinPositiveTags)),
       minNegativeTags:Math.max(1,Math.min(Math.max(1,Math.min(absoluteMaxTagLimit,Number(draft.maxNegativeTags) || defaultMaxNegativeTags)),Number(draft.minNegativeTags) || defaultMinNegativeTags)),
       randomLoraMin:nextConstraints.randomLoraMin,
@@ -1026,7 +1039,7 @@ function App(){
   },[generationDraft.llm,webHost]);
 
 
-  async function rollStack(){
+  async function rollStack():Promise<string[]|null>{
     if(!selected || !library){
       setError('Select a checkpoint first.');
       return null;
@@ -1034,10 +1047,15 @@ function App(){
     setError('');
 
     const manualIds=manualLoraIds.filter(id=>allLoras.some(lora=>lora.id===id));
-    const manualHasCharacter=manualIds.some(id=>{
+    const manualCharacterCount=manualIds.reduce((count,id)=>{
       const lora=allLoras.find(item=>item.id===id);
-      return !!lora && isCharacterLoraForCheckpoint(lora,selected);
-    });
+      return count+(lora && isCharacterLoraForCheckpoint(lora,selected) ? 1 : 0);
+    },0);
+    if(manualCharacterCount>generationDraft.maxCharacterLoras){
+      setError('The selected manual stack contains '+manualCharacterCount+' character LoRAs, but the configured maximum is '+generationDraft.maxCharacterLoras+'.');
+      return null;
+    }
+    const manualHasCharacter=manualCharacterCount>0;
 
     const minCount=Math.max(1,Math.min(maxLoras,constraints.randomLoraMin));
     const maxCount=Math.max(minCount,Math.min(maxLoras,constraints.randomLoraMax));
@@ -1087,15 +1105,23 @@ function App(){
         Math.min(maxLoras,requiredCount)-manualIds.length,
       );
       const randomIds:string[]=[];
+      const availableCharacterSlots=Math.max(0,generationDraft.maxCharacterLoras-manualCharacterCount);
 
-      if(!manualHasCharacter){
-        const character=characterPool[0];
-        if(!character){
-          lastError=new Error('No compatible character LoRA was found for the selected base-model tag in the Registry.');
-          break;
-        }
-        randomIds.push(character.id);
+      if(!manualHasCharacter && randomSlots>0 && characterPool.length===0){
+        lastError=new Error('No compatible character LoRA was found for the selected base-model tag in the Registry.');
+        break;
       }
+
+      const characterSlots=Math.min(
+        availableCharacterSlots,
+        randomSlots,
+        characterPool.length,
+      );
+      const randomCharacterCount=characterSlots>0
+        ? Math.floor(Math.random()*characterSlots)+1
+        : 0;
+
+      randomIds.push(...characterPool.slice(0,randomCharacterCount).map(lora=>lora.id));
 
       const remainingSlots=Math.max(0,randomSlots-randomIds.length);
       randomIds.push(...availablePool.slice(0,remainingSlots).map(lora=>lora.id));
@@ -1118,7 +1144,7 @@ function App(){
         setStageStatus('compatibility','done');
         setStage('selection');
         setStageStatus('selection','done');
-        return result;
+        return combinedIds;
       }catch(e){
         lastError=e;
         // Never silently replace manually selected LoRAs. Only discard
@@ -1141,16 +1167,76 @@ function App(){
     if(alreadySelected){
       setSelectedLoraIds(current=>current.filter(x=>x!==id));
       setManualLoraIds(current=>current.filter(x=>x!==id));
+      setError('');
     }else{
+      const lora=allLoras.find(item=>item.id===id);
+      if(!lora) return;
+      if(selectedLoraIds.length>=generationDraft.maxLoras){
+        setError('Maximum LoRAs reached. Increase MAX LoRAs in Settings or remove an existing LoRA.');
+        return;
+      }
+      const isCharacter=lora.character || lora.tags.some(tag=>normUi(tag)==='character');
+      if(isCharacter && selectedCharacterLoraCount>=generationDraft.maxCharacterLoras){
+        setError('Maximum character LoRAs reached. Increase MAX CHARACTER LoRAs in Settings or remove an existing character LoRA.');
+        return;
+      }
       setSelectedLoraIds(current=>[...current,id]);
       setManualLoraIds(current=>[...current,id]);
+      setError('');
     }
     setPrepared(null);
     setPrompts(null);
   }
 
-  async function generate(){
-    if(busy || !selected || !library) return;
+  const [autoGenerating,setAutoGenerating]=useState(false);
+  const autoGeneratingRef=useRef(false);
+
+  function stopAutoGenerate(){
+    autoGeneratingRef.current=false;
+    setAutoGenerating(false);
+    setToast('AUTO GENERATE STOPPED');
+  }
+
+  async function autoGenerate(){
+    if(autoGeneratingRef.current || busy || !selected || !library || !llm.model) return;
+    autoGeneratingRef.current=true;
+    setAutoGenerating(true);
+    setError('');
+    setToast('AUTO GENERATE STARTED');
+
+    let stackNumber=0;
+    try{
+      while(autoGeneratingRef.current){
+        stackNumber+=1;
+        const stackIds=await rollStack();
+        if(!stackIds || !autoGeneratingRef.current) break;
+
+        let attempt=0;
+        let success=false;
+        while(autoGeneratingRef.current && !success){
+          attempt+=1;
+          setToast('AUTO STACK '+stackNumber+' · ATTEMPT '+attempt+' · GENERATING');
+          success=await generate(stackIds);
+          if(!success && autoGeneratingRef.current){
+            setToast('AUTO STACK '+stackNumber+' · ATTEMPT '+attempt+' FAILED · RETRYING SAME LORA STACK');
+            await new Promise(resolve=>setTimeout(resolve,250));
+          }
+        }
+
+        if(success && autoGeneratingRef.current){
+          setToast('AUTO STACK '+stackNumber+' COMPLETE · SELECTING NEXT RANDOM LORA STACK');
+        }
+      }
+    }catch(e){
+      setError(String(e));
+    }finally{
+      autoGeneratingRef.current=false;
+      setAutoGenerating(false);
+    }
+  }
+
+  async function generate(loraIdsOverride?:string[]):Promise<boolean>{
+    if(busy || !selected || !library) return false;
     setBusy(true);
     setError('');
     setToast('');
@@ -1163,9 +1249,11 @@ function App(){
     setResultFilename('');
     let generatedImageDataUrl='';
     let generatedImageFilename='';
+    let generationSucceeded=false;
 
     try{
-      const generationSelectedLoraIds=selectedLoraIds.filter(id=>compatibleLoras.some(lora=>lora.id===id));
+      const sourceLoraIds=loraIdsOverride ?? selectedLoraIds;
+      const generationSelectedLoraIds=sourceLoraIds.filter(id=>compatibleLoras.some(lora=>lora.id===id));
 
       setStage('compatibility');
       setStageStatus('compatibility','running');
@@ -1414,6 +1502,7 @@ function App(){
         if(generation.imageDataUrl){
           generatedImageDataUrl=generation.imageDataUrl;
           setResultImage(generation.imageDataUrl);
+          generationSucceeded=true;
         }
         if(generation.filename){
           generatedImageFilename=generation.filename;
@@ -1454,6 +1543,7 @@ function App(){
         maxTagLength:generationDraft.maxTagLength,
         plannerTemperature:generationDraft.plannerTemperature,
         tagTemperature:generationDraft.tagTemperature,
+        maxCharacterLoras:generationDraft.maxCharacterLoras,
       };
       const record:GenerationRecord={
         id:crypto.randomUUID(),
@@ -1484,10 +1574,14 @@ function App(){
       setSelectedHistoryId(record.id);
       setStage('recorded');
       setStageStatus('recorded','done');
-      setToast(promptId ? 'Generation complete · ' + promptId : 'Generation recorded');
+      setToast(generationSucceeded
+        ? (promptId ? 'Generation complete · ' + promptId : 'Generation complete')
+        : (promptId ? 'Generation recorded without an output image · ' + promptId : 'Generation failed without an output image'));
+      return generationSucceeded;
     }catch(e){
       setError(String(e));
       setStageStatus(stage,'error');
+      return generationSucceeded;
     }finally{
       setBusy(false);
     }
@@ -1689,8 +1783,11 @@ function App(){
           </div>}
 
           <div className="run-row">
-            <button className="secondary-btn" disabled={busy || !selected} onClick={()=>void rollStack()}><RefreshCw size={14}/> RANDOMIZE LORAS</button>
-            <button className="primary-btn" disabled={busy || !selected || !llm.model} onClick={()=>void generate()}><Play size={15}/> {busy ? 'GENERATING' : 'GENERATE'}</button>
+            <button className="secondary-btn" disabled={busy || autoGenerating || !selected} onClick={()=>void rollStack()}><RefreshCw size={14}/> RANDOMIZE LORAS</button>
+            <button className="primary-btn" disabled={busy || autoGenerating || !selected || !llm.model} onClick={()=>void generate()}><Play size={15}/> {busy ? 'GENERATING' : 'GENERATE'}</button>
+            <button className={'secondary-btn ' + (autoGenerating ? 'active' : '')} disabled={!selected || !llm.model} onClick={()=>autoGenerating ? stopAutoGenerate() : void autoGenerate()}>
+              <Sparkles size={14}/> {autoGenerating ? 'STOP AUTO' : 'AUTO GENERATE'}
+            </button>
           </div>
         </section>
 
@@ -1833,7 +1930,7 @@ function App(){
       </div>
 
       <div className="right-section lora-section">
-        <div className="right-section-head"><span>LORAS</span><span>{selectedLoraIds.length} / {allLoras.length}</span></div>
+        <div className="right-section-head"><span>LORAS</span><span>{selectedLoraIds.length} / {generationDraft.maxLoras} · {selectedCharacterLoraCount} CHAR</span></div>
         <div className="search-row compact"><Search size={13}/><input value={loraSearch} onChange={e=>setLoraSearch(e.target.value)} placeholder="Search LoRAs"/></div>
         <div className="lora-list">
           {filteredLoras.map(lora=>{
@@ -2089,8 +2186,10 @@ function App(){
 
             <section className="settings-section settings-card">
               <div className="settings-section-title">LoRA SELECTION LIMITS</div>
+              <div className="settings-helper">MAX CHARACTER LoRAs controls how many character-identity LoRAs can be manually selected or included by RANDOMIZE LORAS and AUTO GENERATE.</div>
               <div className="settings-form-grid">
-                <label className="settings-field"><span>MAX LoRAs</span><input type="number" min={1} max={16} value={generationDraft.maxLoras} onChange={e=>setGenerationDraft(d=>({...d,maxLoras:Math.max(1,Number(e.target.value))}))}/></label>
+                <label className="settings-field"><span>MAX LoRAs</span><input type="number" min={1} max={absoluteMaxLoraLimit} value={generationDraft.maxLoras} onChange={e=>setGenerationDraft(d=>({...d,maxLoras:Math.max(1,Number(e.target.value))}))}/></label>
+                <label className="settings-field"><span>MAX CHARACTER LoRAs</span><input type="number" min={1} max={Math.min(absoluteMaxLoraLimit,generationDraft.maxLoras)} value={generationDraft.maxCharacterLoras} onChange={e=>setGenerationDraft(d=>({...d,maxCharacterLoras:Math.max(1,Math.min(d.maxLoras,Number(e.target.value)||1))}))}/></label>
                 <label className="settings-field"><span>RANDOM MIN</span><input type="number" min={1} max={16} value={generationDraft.randomLoraMin} onChange={e=>setGenerationDraft(d=>({...d,randomLoraMin:Math.max(1,Number(e.target.value))}))}/></label>
                 <label className="settings-field"><span>RANDOM MAX</span><input type="number" min={1} max={16} value={generationDraft.randomLoraMax} onChange={e=>setGenerationDraft(d=>({...d,randomLoraMax:Math.max(1,Number(e.target.value))}))}/></label>
               </div>
