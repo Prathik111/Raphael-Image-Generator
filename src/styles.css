@@ -629,3 +629,82 @@ body{font-size:15px}
   .settings-drawer .drawer-head{padding-left:14px;padding-right:14px}
   .settings-drawer .drawer-foot{padding-left:14px;padding-right:14px}
 }
+
+/* --- Settings theme polish and configurable tag validation controls --- */
+.settings-number-field small{
+  color:var(--dim);
+  font-size:10px;
+  line-height:1.4;
+  letter-spacing:.02em;
+}
+.settings-field input,
+.settings-field select,
+.settings-field textarea{
+  appearance:none;
+  -webkit-appearance:none;
+  border:1px solid rgba(255,255,255,.12);
+  border-radius:3px;
+  background:linear-gradient(180deg,rgba(255,255,255,.035),rgba(0,0,0,.40));
+  color:var(--text);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.025);
+  transition:border-color .14s ease,background .14s ease,box-shadow .14s ease;
+}
+.settings-field input:hover,
+.settings-field select:hover,
+.settings-field textarea:hover{
+  border-color:rgba(255,255,255,.22);
+}
+.settings-field input:focus,
+.settings-field select:focus,
+.settings-field textarea:focus{
+  border-color:rgba(255,255,255,.52);
+  outline:none;
+  background:linear-gradient(180deg,rgba(255,255,255,.05),rgba(0,0,0,.44));
+  box-shadow:0 0 0 1px rgba(255,255,255,.06),0 0 18px rgba(255,255,255,.045);
+}
+.settings-field textarea{
+  scrollbar-width:thin;
+  scrollbar-color:rgba(255,255,255,.35) transparent;
+}
+.settings-field textarea::-webkit-scrollbar{width:6px}
+.settings-field textarea::-webkit-scrollbar-thumb{
+  background:rgba(255,255,255,.22);
+  border-radius:4px;
+}
+.settings-field input::placeholder,
+.settings-field textarea::placeholder{
+  color:rgba(232,242,241,.24);
+}
+.settings-field select{
+  color-scheme:dark;
+  background-color:#07100e;
+  cursor:pointer;
+}
+.settings-field select option{
+  background:#07100e;
+  color:#f4f7f7;
+}
+.settings-field input[type="number"]{
+  font-variant-numeric:tabular-nums;
+}
+.settings-field input[type="range"]{
+  appearance:auto;
+  -webkit-appearance:auto;
+  accent-color:#fff;
+  background:transparent;
+  border:0;
+  box-shadow:none;
+}
+.settings-field input[type="range"]:focus{box-shadow:none}
+.settings-card + .settings-card{margin-top:0}
+.settings-tabs + .drawer-scroll{
+  background:linear-gradient(180deg,rgba(255,255,255,.012),transparent 26px);
+}
+.settings-drawer .drawer-foot{
+  border-top:1px solid rgba(255,255,255,.12);
+}
+.settings-drawer .drawer-foot .primary-btn{
+  min-height:38px;
+  border-radius:3px;
+  box-shadow:0 0 18px rgba(255,255,255,.06);
+}
