@@ -215,7 +215,35 @@ function loadPersistedGenerationSettings(): StoredGenerationSettings {
     const raw=window.localStorage.getItem(generationSettingsStorageKey);
     if(!raw) return {};
     const parsed=JSON.parse(raw) as StoredGenerationSettings;
-    return parsed && typeof parsed==='object' ? parsed : {};
+    if(!parsed || typeof parsed!=='object') return {};
+
+    const migrated:StoredGenerationSettings={...parsed};
+
+    // Older v2 settings stored behavioral rules inside the user templates.
+    // Move only those known legacy defaults so custom user templates survive.
+    if(typeof migrated.userPromptTemplate==='string'
+      && /Write the FINAL positive and negative prompts/i.test(migrated.userPromptTemplate)){
+      migrated.userPromptTemplate=defaultUserPromptTemplate;
+    }
+    if(typeof migrated.expansionPromptTemplate==='string'
+      && /EXPANSION PASS\. Rewrite the previous result/i.test(migrated.expansionPromptTemplate)){
+      migrated.expansionPromptTemplate=defaultExpansionPromptTemplate;
+    }
+
+    migrated.plannerSystemPrompt =
+      typeof migrated.plannerSystemPrompt==='string' && migrated.plannerSystemPrompt.trim()
+        ? migrated.plannerSystemPrompt
+        : defaultPlannerSystemPrompt;
+    migrated.tagSystemPrompt =
+      typeof migrated.tagSystemPrompt==='string' && migrated.tagSystemPrompt.trim()
+        ? migrated.tagSystemPrompt
+        : defaultTagSystemPrompt;
+    migrated.repairSystemPrompt =
+      typeof migrated.repairSystemPrompt==='string' && migrated.repairSystemPrompt.trim()
+        ? migrated.repairSystemPrompt
+        : defaultRepairSystemPrompt;
+
+    return migrated;
   }catch{
     return {};
   }
