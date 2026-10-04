@@ -193,6 +193,8 @@ const defaultMaxNegativeTags = 35;
 const absoluteMaxTagLimit = 100;
 const defaultMaxTagLength = 64;
 const absoluteMaxTagLength = 256;
+const defaultPlannerTemperature = 0.35;
+const defaultTagTemperature = 0.72;
 
 interface StoredGenerationSettings {
   llm?: LlmSettings;
@@ -216,6 +218,8 @@ interface StoredGenerationSettings {
   minNegativeTags?: number;
   maxNegativeTags?: number;
   maxTagLength?: number;
+  plannerTemperature?: number;
+  tagTemperature?: number;
   manualLoraIds?: string[];
 }
 
@@ -784,6 +788,8 @@ function App(){
     minNegativeTags:Math.max(1,Math.min(persistedGenerationSettings.maxNegativeTags ?? defaultMaxNegativeTags,persistedGenerationSettings.minNegativeTags ?? defaultMinNegativeTags)),
     maxNegativeTags:Math.max(1,Math.min(absoluteMaxTagLimit,persistedGenerationSettings.maxNegativeTags ?? defaultMaxNegativeTags)),
     maxTagLength:Math.max(1,Math.min(absoluteMaxTagLength,persistedGenerationSettings.maxTagLength ?? defaultMaxTagLength)),
+    plannerTemperature:Math.max(0,Math.min(2,persistedGenerationSettings.plannerTemperature ?? defaultPlannerTemperature)),
+    tagTemperature:Math.max(0,Math.min(2,persistedGenerationSettings.tagTemperature ?? defaultTagTemperature)),
   });
   const [selectedHistoryId,setSelectedHistoryId]=useState('');
   const [historySettingsVisible,setHistorySettingsVisible]=useState(false);
@@ -976,6 +982,8 @@ function App(){
       maxLoras:cappedMax,
       maxNegativeTags:Math.max(1,Math.min(absoluteMaxTagLimit,Number(draft.maxNegativeTags) || defaultMaxNegativeTags)),
       maxTagLength:Math.max(1,Math.min(absoluteMaxTagLength,Number(draft.maxTagLength) || defaultMaxTagLength)),
+      plannerTemperature:Math.max(0,Math.min(2,Number(draft.plannerTemperature) || 0)),
+      tagTemperature:Math.max(0,Math.min(2,Number(draft.tagTemperature) || 0)),
       minPositiveTags:Math.max(1,Math.min(100,Number(draft.minPositiveTags) || defaultMinPositiveTags)),
       minNegativeTags:Math.max(1,Math.min(Math.max(1,Math.min(absoluteMaxTagLimit,Number(draft.maxNegativeTags) || defaultMaxNegativeTags)),Number(draft.minNegativeTags) || defaultMinNegativeTags)),
       randomLoraMin:nextConstraints.randomLoraMin,
@@ -1231,7 +1239,7 @@ function App(){
       streamText.current='';
       setPlanStream('');
       await streamLlm({
-        settings:llm,
+        settings:{...llm,temperature:generationDraft.plannerTemperature},
         systemPrompt:plannerSystemPrompt,
         userPrompt:renderPromptTemplate(defaultPlanningPrompt,basePromptValues),
       },event=>{
@@ -1285,7 +1293,7 @@ function App(){
         '\n\nConvert this exact plan into deterministic comma-separated image tags. Do not invent a different pose, background, expression, lighting, camera or framing.';
 
       await streamLlm({
-        settings:llm,
+        settings:{...llm,temperature:generationDraft.tagTemperature},
         systemPrompt:tagSystemPrompt,
         userPrompt,
       },event=>{
@@ -1326,7 +1334,7 @@ function App(){
         '\nRules: at least '+generationDraft.minPositiveTags+' positive comma-separated tags, between '+generationDraft.minNegativeTags+' and '+generationDraft.maxNegativeTags+' negative tags, ordinary tags must be 1-6 words and <='+generationDraft.maxTagLength+' characters, no sentence-like tags, no prose, no metaphors, no narrative clauses. Preserve every documented activation prompt exactly. Return JSON only.';
 
         await streamLlm({
-          settings:llm,
+          settings:{...llm,temperature:generationDraft.tagTemperature},
           systemPrompt:repairSystemPrompt,
           userPrompt:expansionUserPrompt,
         },event=>{
@@ -1444,6 +1452,8 @@ function App(){
         minNegativeTags:generationDraft.minNegativeTags,
         maxNegativeTags:generationDraft.maxNegativeTags,
         maxTagLength:generationDraft.maxTagLength,
+        plannerTemperature:generationDraft.plannerTemperature,
+        tagTemperature:generationDraft.tagTemperature,
       };
       const record:GenerationRecord={
         id:crypto.randomUUID(),
@@ -1732,7 +1742,9 @@ function App(){
               <div><span>PROVIDER</span><b>{selectedHistory.generationSettings.llm.provider}</b></div>
               <div><span>MODEL</span><b>{selectedHistory.generationSettings.llm.model || '—'}</b></div>
               <div><span>DEMOGRAPHIC</span><b>{selectedHistory.generationSettings.demographic.toUpperCase()}</b></div>
-              <div><span>TEMPERATURE</span><b>{selectedHistory.generationSettings.llm.temperature.toFixed(2)}</b></div>
+              <div><span>PLANNER TEMPERATURE</span><b>{(selectedHistory.generationSettings.plannerTemperature ?? selectedHistory.generationSettings.llm.temperature).toFixed(2)}</b></div>
+              <div><span>TAG GENERATOR TEMPERATURE</span><b>{(selectedHistory.generationSettings.tagTemperature ?? selectedHistory.generationSettings.llm.temperature).toFixed(2)}</b></div>
+              <div><span>BASE TEMPERATURE</span><b>{selectedHistory.generationSettings.llm.temperature.toFixed(2)}</b></div>
               <div><span>MAX TOKENS</span><b>{selectedHistory.generationSettings.llm.maxTokens}</b></div>
               <div><span>CONTEXT TOKENS</span><b>{selectedHistory.generationSettings.llm.contextTokens || 16384}</b></div>
               <div><span>SIZE</span><b>{selectedHistory.generationSettings.width} × {selectedHistory.generationSettings.height}</b></div>
@@ -1898,8 +1910,25 @@ function App(){
                     setGenerationDraft(d=>({...d,llm:{...d.llm,model:d.llm.model || found[0] || ''}}));
                   }catch(e){setError(String(e));}
                 })()}><RefreshCw size={13}/> GET MODELS</button>
-                <label className="settings-field"><span>TEMPERATURE <b>{generationDraft.llm.temperature.toFixed(2)}</b></span><input type="range" min={0} max={2} step={0.05} value={generationDraft.llm.temperature} onChange={e=>setGenerationDraft(d=>({...d,llm:{...d.llm,temperature:Number(e.target.value)}}))}/></label>
-                <label className="settings-field"><span>MAX TOKENS</span><input type="number" min={128} max={16384} value={generationDraft.llm.maxTokens} onChange={e=>setGenerationDraft(d=>({...d,llm:{...d.llm,maxTokens:Math.max(128,Number(e.target.value))}}))}/></label>
+                <label className="settings-field">
+                  <span>PLANNER TEMPERATURE <b>{generationDraft.plannerTemperature.toFixed(2)}</b></span>
+                  <input type="range" min={0} max={2} step={0.05} value={generationDraft.plannerTemperature} onChange={e=>setGenerationDraft(d=>({...d,plannerTemperature:Number(e.target.value)}))}/>
+                  <small>Default: {defaultPlannerTemperature.toFixed(2)} · lower values make planning more deterministic</small>
+                </label>
+                <label className="settings-field">
+                  <span>TAG GENERATOR TEMPERATURE <b>{generationDraft.tagTemperature.toFixed(2)}</b></span>
+                  <input type="range" min={0} max={2} step={0.05} value={generationDraft.tagTemperature} onChange={e=>setGenerationDraft(d=>({...d,tagTemperature:Number(e.target.value)}))}/>
+                  <small>Default: {defaultTagTemperature.toFixed(2)} · also used for validation repairs</small>
+                </label>
+                <label className="settings-field">
+                  <span>BASE TEMPERATURE <b>{generationDraft.llm.temperature.toFixed(2)}</b></span>
+                  <input type="range" min={0} max={2} step={0.05} value={generationDraft.llm.temperature} onChange={e=>setGenerationDraft(d=>({...d,llm:{...d.llm,temperature:Number(e.target.value)}}))}/>
+                  <small>Fallback/general LLM temperature kept for compatibility</small>
+                </label>
+                <label className="settings-field">
+                  <span>MAX TOKENS</span>
+                  <input type="number" min={128} max={16384} value={generationDraft.llm.maxTokens} onChange={e=>setGenerationDraft(d=>({...d,llm:{...d.llm,maxTokens:Math.max(128,Number(e.target.value))}}))}/>
+                </label>
                 <label className="settings-field settings-field-full"><span>CONTEXT TOKENS</span><input type="number" min={2048} max={131072} step={1024} value={generationDraft.llm.contextTokens} onChange={e=>setGenerationDraft(d=>({...d,llm:{...d.llm,contextTokens:Math.max(2048,Number(e.target.value))}}))}/></label>
               </div>
             </section>
