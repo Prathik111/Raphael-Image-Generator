@@ -1218,10 +1218,8 @@ fn comfy_relative_model_name(path: &str, folder: &str, fallback: &str) -> String
 
 fn checkpoint_path_uses_unet_loader(path: &str) -> bool {
     let normalized = path.replace('\\', "/").to_lowercase();
-    normalized.contains("/models/unet/")
-        || normalized.contains("/models/diffusion_models/")
-        || normalized.contains("\\models\\unet\\")
-        || normalized.contains("\\models\\diffusion_models\\")
+    normalized.contains("models/unet/")
+        || normalized.contains("models/diffusion_models/")
 }
 
 #[tauri::command]
