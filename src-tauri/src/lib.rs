@@ -1722,8 +1722,15 @@ async fn web_command(
             serde_json::to_value(inject_prompts(request)?).map_err(|e|e.to_string())
         }
         "submit_to_comfy"=>{
+            if state.cancel_generation.load(Ordering::SeqCst) {
+                return Err("Generation stopped.".into());
+            }
             let request=serde_json::from_value::<SubmitRequest>(req_value).map_err(|e|e.to_string())?;
-            serde_json::to_value(submit_to_comfy(request).await?).map_err(|e|e.to_string())
+            let result=submit_to_comfy(request).await?;
+            if state.cancel_generation.load(Ordering::SeqCst) {
+                return Err("Generation stopped.".into());
+            }
+            Ok(result)
         }
         "load_history"=>serde_json::to_value(load_history(state.app.clone())?).map_err(|e|e.to_string()),
         "append_history"=>{
