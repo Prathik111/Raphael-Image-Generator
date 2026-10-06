@@ -1743,7 +1743,7 @@ async fn web_command(
                 return Err("Generation stopped.".into());
             }
             let request=serde_json::from_value::<SubmitRequest>(req_value).map_err(|e|e.to_string())?;
-            let result=submit_to_comfy(request).await?;
+            let result=submit_to_comfy_inner(request,state.cancel_generation.clone()).await?;
             if state.cancel_generation.load(Ordering::SeqCst) {
                 return Err("Generation stopped.".into());
             }
