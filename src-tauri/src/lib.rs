@@ -1464,9 +1464,19 @@ async fn stop_generation(
 }
 
 #[tauri::command]
-async fn submit_to_comfy(req:SubmitRequest)->Result<Value,String>{
+async fn submit_to_comfy(
+    state:tauri::State<'_,AppState>,
+    req:SubmitRequest,
+)->Result<Value,String>{
+    if state.cancel_generation.load(Ordering::SeqCst) {
+        return Err("Generation stopped.".into());
+    }
     let response=reqwest::Client::new().post(format!("{}/prompt",base_url(&req.comfy_url))).json(&json!({"prompt":req.workflow,"client_id":"raphael-prompt-forge"})).send().await.map_err(|e|e.to_string())?;
     let status=response.status(); let text=response.text().await.unwrap_or_default();
+    if state.cancel_generation.load(Ordering::SeqCst) {
+        let _=interrupt_comfy(&req.comfy_url).await;
+        return Err("Generation stopped.".into());
+    }
     if !status.is_success(){return Err(format!("ComfyUI returned HTTP {}: {}",status,text))}
     serde_json::from_str(&text).map_err(|e|format!("Invalid ComfyUI response: {}",e))
 }
