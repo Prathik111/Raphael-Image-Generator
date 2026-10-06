@@ -2137,7 +2137,7 @@ function App(){
                     <div key={lora.id} className="planning-character-card">
                       <b>{index+1}. {lora.name}</b>
                       <small>GENDER: {character?.gender || 'unknown'}</small>
-                      <small>{character?.appearance || lora.description || 'character identity LoRA selected'}</small>
+                      <small>{character?.appearance || lora.cacheDescription || lora.name || 'character identity LoRA selected'}</small>
                       <small>POSE: {character?.pose || plan.pose} · EXPRESSION: {character?.expression || plan.expression}</small>
                       <small>POSITION: {character?.position || 'planned position'} · {character?.interaction || 'planned interaction'}</small>
                     </div>
