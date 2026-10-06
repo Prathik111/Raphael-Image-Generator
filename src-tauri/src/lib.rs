@@ -1630,7 +1630,7 @@ async fn web_command(
         return AxumJson(json!({"stopped":true})).into_response();
     }
     if command=="monitor_comfy_generation" {
-        return web_monitor_comfy(AxumJson(body)).await.into_response();
+        return web_monitor_comfy(state.clone(), AxumJson(body)).await.into_response();
     }
 
     let req_value=body.get("req").cloned().unwrap_or_else(||body.clone());
@@ -1763,6 +1763,7 @@ async fn web_stream_llm(
 }
 
 async fn web_monitor_comfy(
+    state:WebApiState,
     AxumJson(body):AxumJson<Value>,
 )->Sse<impl Stream<Item=Result<Event,std::convert::Infallible>>>{
     let req:Result<MonitorComfyRequest,String>=serde_json::from_value(body.get("req").cloned().unwrap_or(body.clone())).map_err(|e|e.to_string());
