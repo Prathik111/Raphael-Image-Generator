@@ -13,7 +13,17 @@ import type {
 type Stage = 'library' | 'compatibility' | 'selection' | 'planning' | 'llm' | 'workflow' | 'comfy' | 'recorded';
 type Status = 'idle' | 'running' | 'done' | 'error';
 
+interface CharacterPlan {
+  name: string;
+  appearance: string;
+  pose: string;
+  expression: string;
+  position: string;
+  interaction: string;
+}
+
 interface GenerationPlan {
+  characters: CharacterPlan[];
   character: string;
   action: string;
   pose: string;
@@ -61,8 +71,17 @@ Your job is to decide the concrete visual content of an image before another mod
 Do not generate the final positive or negative prompt.
 Do not write prose, narrative descriptions, metaphors, or image-model prompt tags.
 
-Return JSON only with exactly these string fields:
-character, action, pose, setting, background, expression, dress, composition, lighting, camera, framing.
+Return JSON only with exactly these fields:
+characters, action, pose, setting, background, expression, dress, composition, lighting, camera, framing.
+
+"characters" must be an array with exactly one object for EVERY selected CHARACTER IDENTITY LoRA.
+Each character object must contain:
+name, appearance, pose, expression, position, interaction.
+
+If multiple character LoRAs are selected, NEVER merge them into one character.
+If 2 character LoRAs are selected, return exactly 2 character objects.
+If 3 character LoRAs are selected, return exactly 3 character objects.
+Preserve the identity and documented purpose of every selected character LoRA.
 
 Use short canonical visual choices, preferably 1-6 words per field.
 Make one concrete decision for every field.
@@ -134,6 +153,9 @@ BASE: {{BASE}}
 
 SELECTED LoRA METADATA:
 {{LORA_METADATA}}
+
+SELECTED CHARACTER IDENTITY LoRAs:
+{{CHARACTERS}}
 
 USER CONSTRAINTS:
 CHARACTER: {{CHARACTER}}
@@ -251,7 +273,9 @@ function loadPersistedGenerationSettings(): StoredGenerationSettings {
     }
 
     migrated.plannerSystemPrompt =
-      typeof migrated.plannerSystemPrompt==='string' && migrated.plannerSystemPrompt.trim()
+      typeof migrated.plannerSystemPrompt==='string'
+        && migrated.plannerSystemPrompt.trim()
+        && !/Return JSON only with exactly these string fields:\s*character, action, pose/i.test(migrated.plannerSystemPrompt)
         ? migrated.plannerSystemPrompt
         : defaultPlannerSystemPrompt;
     migrated.tagSystemPrompt =
@@ -508,14 +532,41 @@ function extractJsonObject(raw:string):Record<string,unknown>{
   return value as Record<string,unknown>;
 }
 
+interface SelectedCharacterInput {
+  name:string;
+  description?:string|null;
+  activationTags:string[];
+}
+
 function textField(value:unknown,fallback=''):string{
   return typeof value==='string' ? value.trim() : fallback;
 }
 
-function parseGenerationPlan(raw:string, fallback:SceneSelection):GenerationPlan{
+function parseGenerationPlan(raw:string, fallback:SceneSelection, expectedCharacterLoras:SelectedCharacterInput[]):GenerationPlan{
   const value=extractJsonObject(raw);
+  const rawCharacters=Array.isArray(value.characters) ? value.characters : [];
+  const characters:CharacterPlan[]=rawCharacters.map((item,index)=>{
+    const obj=item && typeof item==='object' ? item as Record<string,unknown> : {};
+    const fallbackLora=expectedCharacterLoras[index];
+    return {
+      name:textField(obj.name,fallbackLora?.name || 'Character '+(index+1)),
+      appearance:textField(obj.appearance,fallbackLora?.description || fallbackLora?.name || 'distinct character appearance'),
+      pose:textField(obj.pose,'natural pose'),
+      expression:textField(obj.expression,'calm expression'),
+      position:textField(obj.position,'balanced position'),
+      interaction:textField(obj.interaction,'independent presence'),
+    };
+  });
+  if(characters.length !== expectedCharacterLoras.length){
+    throw new Error('Planner returned '+characters.length+' characters, but '+expectedCharacterLoras.length+' character LoRAs are selected.');
+  }
+  const character=textField(value.character,
+    characters.map((item,index)=>'CHARACTER '+(index+1)+': '+item.name+' — '+item.appearance).join('\n')
+      || fallback.character
+  );
   const plan:GenerationPlan={
-    character:textField(value.character,fallback.character),
+    characters,
+    character,
     action:textField(value.action,'natural pose'),
     pose:textField(value.pose,fallback.pose),
     setting:textField(value.setting,fallback.setting),
@@ -1296,10 +1347,29 @@ function App(){
   const [autoGenerating,setAutoGenerating]=useState(false);
   const autoGeneratingRef=useRef(false);
 
+  async function stopGeneration(){
+    autoGeneratingRef.current=false;
+    setAutoGenerating(false);
+    if(!busy) {
+      setToast('NO ACTIVE GENERATION');
+      return;
+    }
+    setToast('STOPPING GENERATION…');
+    try{
+      await apiInvoke('stop_generation',{comfyUrl});
+    }catch(e){
+      setError('Could not stop generation: '+String(e));
+    }
+  }
+
   function stopAutoGenerate(){
     autoGeneratingRef.current=false;
     setAutoGenerating(false);
-    setToast('AUTO GENERATE STOPPED');
+    if(busy){
+      void stopGeneration();
+    }else{
+      setToast('AUTO GENERATE STOPPED');
+    }
   }
 
   async function autoGenerate(){
@@ -1414,12 +1484,28 @@ function App(){
         systemPromptValues,
       );
 
+      const characterLoras=prep.loras.filter(l=>l.character);
+      const selectedCharacterInputs:SelectedCharacterInput[]=characterLoras.map(l=>({
+        name:l.name,
+        description:l.description,
+        activationTags:l.activationTags,
+      }));
+      const characterMetadata=characterLoras.length
+        ? characterLoras.map((l,index)=>
+            'CHARACTER '+(index+1)+' LoRA\n'+
+            'NAME: '+l.name+'\n'+
+            'DESCRIPTION: '+(l.description || '(none)')+'\n'+
+            'ACTIVATION PROMPT(S): '+(l.activationTags.length ? l.activationTags.join(' | ') : '(none)')
+          ).join('\n\n')
+        : '(none selected)';
+
       const basePromptValues={
         CHECKPOINT:prep.checkpoint.name,
         BASE:prep.checkpoint.baseModel || 'unknown',
         COMPATIBILITY:prep.compatibilityKeys.join(', '),
         LORA_METADATA:loraMetadata,
-        CHARACTER:prep.scene.character,
+        CHARACTERS:characterMetadata,
+        CHARACTER:characterMetadata,
         SETTING:prep.scene.setting,
         POSE:prep.scene.pose,
         EXPRESSION:prep.scene.expression,
@@ -1441,13 +1527,28 @@ function App(){
         flushSync(()=>setPlanStream(streamText.current));
       });
 
-      const generationPlan=parseGenerationPlan(streamText.current,prep.scene);
+      const generationPlan=parseGenerationPlan(streamText.current,prep.scene,selectedCharacterInputs);
       setPlan(generationPlan);
       setStageStatus('planning','done');
 
       const planValues={
         ...basePromptValues,
-        CHARACTER:generationPlan.character,
+        CHARACTER:generationPlan.characters.map((character,index)=>
+          'CHARACTER '+(index+1)+': '+character.name+
+          ' | APPEARANCE: '+character.appearance+
+          ' | POSE: '+character.pose+
+          ' | EXPRESSION: '+character.expression+
+          ' | POSITION: '+character.position+
+          ' | INTERACTION: '+character.interaction
+        ).join('\n'),
+        CHARACTERS:generationPlan.characters.map((character,index)=>
+          'CHARACTER '+(index+1)+': '+character.name+
+          ' | APPEARANCE: '+character.appearance+
+          ' | POSE: '+character.pose+
+          ' | EXPRESSION: '+character.expression+
+          ' | POSITION: '+character.position+
+          ' | INTERACTION: '+character.interaction
+        ).join('\n'),
         SETTING:generationPlan.setting,
         POSE:generationPlan.pose,
         EXPRESSION:generationPlan.expression,
@@ -1467,7 +1568,16 @@ function App(){
       setPrompts(null);
       const plannedDecisionBlock=[
         'PLANNED GENERATION DECISION:',
-        'CHARACTER: '+generationPlan.character,
+        'CHARACTERS:',
+        ...generationPlan.characters.map((character,index)=>
+          'CHARACTER '+(index+1)+': '+character.name+
+          ' | APPEARANCE: '+character.appearance+
+          ' | POSE: '+character.pose+
+          ' | EXPRESSION: '+character.expression+
+          ' | POSITION: '+character.position+
+          ' | INTERACTION: '+character.interaction
+        ),
+        'ACTION: '+generationPlan.action,
         'ACTION: '+generationPlan.action,
         'POSE: '+generationPlan.pose,
         'SETTING: '+generationPlan.setting,
@@ -1883,7 +1993,17 @@ function App(){
               {planStream ? <pre>{planStream}</pre> : <div className="stream-placeholder"><Terminal size={18}/><span>Planning decision will stream here first.</span></div>}
             </div>
             {plan && <div className="planning-grid">
-              <div><span>CHARACTER</span><b>{plan.character}</b></div>
+              <div className="planning-character-list">
+                <span>CHARACTERS · {plan.characters.length}</span>
+                {plan.characters.map((character,index)=>
+                  <div key={index} className="planning-character-card">
+                    <b>{index+1}. {character.name}</b>
+                    <small>{character.appearance}</small>
+                    <small>POSE: {character.pose} · EXPRESSION: {character.expression}</small>
+                    <small>POSITION: {character.position} · {character.interaction}</small>
+                  </div>
+                )}
+              </div>
               <div><span>ACTION</span><b>{plan.action}</b></div>
               <div><span>POSE</span><b>{plan.pose}</b></div>
               <div><span>BACKGROUND</span><b>{plan.background}</b></div>
@@ -1924,7 +2044,9 @@ function App(){
 
           <div className="run-row">
             <button className="secondary-btn" disabled={busy || autoGenerating || !selected} onClick={()=>void rollStack()}><RefreshCw size={14}/> RANDOMIZE LORAS</button>
-            <button className="primary-btn" disabled={busy || autoGenerating || !selected || !llm.model} onClick={()=>void generate()}><Play size={15}/> {busy ? 'GENERATING' : 'GENERATE'}</button>
+            {busy
+              ? <button className="secondary-btn active" onClick={()=>void stopGeneration()}><X size={15}/> STOP GENERATION</button>
+              : <button className="primary-btn" disabled={autoGenerating || !selected || !llm.model} onClick={()=>void generate()}><Play size={15}/> GENERATE</button>}
             <button className={'secondary-btn ' + (autoGenerating ? 'active' : '')} disabled={!selected || !llm.model} onClick={()=>autoGenerating ? stopAutoGenerate() : void autoGenerate()}>
               <Sparkles size={14}/> {autoGenerating ? 'STOP AUTO' : 'AUTO GENERATE'}
             </button>
