@@ -15,7 +15,7 @@ use futures_util::StreamExt;
 use rand::{prelude::IndexedRandom, seq::SliceRandom, Rng};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{fs, path::{Path, PathBuf}, process::Command, sync::Arc, time::{Duration, Instant, SystemTime, UNIX_EPOCH}};
+use std::{fs, path::{Path, PathBuf}, process::Command, sync::{Arc, atomic::{AtomicBool, Ordering}}, time::{Duration, Instant, SystemTime, UNIX_EPOCH}};
 use tauri::{AppHandle, Manager};
 use tauri::ipc::Channel;
 use tokio::sync::Mutex;
@@ -176,6 +176,7 @@ struct WebHostRuntime {
 #[derive(Clone)]
 struct AppState {
     active_stream: Arc<Mutex<bool>>,
+    cancel_generation: Arc<AtomicBool>,
     web_host: Arc<Mutex<Option<WebHostRuntime>>>,
 }
 
@@ -184,6 +185,7 @@ struct WebApiState {
     app: AppHandle,
     llm: Arc<Mutex<LlmSettings>>,
     generation_settings: Arc<Mutex<Value>>,
+    cancel_generation: Arc<AtomicBool>,
 }
 
 fn norm(s: &str) -> String { s.trim().to_lowercase().replace([' ', '_', '-', '.', '/'], "") }
@@ -982,16 +984,21 @@ async fn stream_llm(
         if *busy{return Err("An LLM stream is already active.".into())}
         *busy=true;
     }
-    let result=stream_llm_inner(req, |delta| {
+    state.cancel_generation.store(false, Ordering::SeqCst);
+    let cancel_generation=state.cancel_generation.clone();
+    let result=stream_llm_inner(req, cancel_generation, |delta| {
         on_event.send(delta).map_err(|e|format!("LLM stream channel closed: {}",e))
     }).await;
     *state.active_stream.lock().await=false;
     result
 }
 
-async fn stream_llm_inner<F>(req:LlmRequest, mut emit:F)->Result<(),String>
+async fn stream_llm_inner<F>(req:LlmRequest, cancel_generation:Arc<AtomicBool>, mut emit:F)->Result<(),String>
 where F:FnMut(LlmDelta)->Result<(),String> + Send
 {
+    if cancel_generation.load(Ordering::SeqCst) {
+        return Err("Generation stopped.".into());
+    }
     let client=reqwest::Client::new();
     let base=base_url(&req.settings.base_url);
     let (url,mut body,ollama)=if req.settings.provider=="ollama"{
@@ -1046,6 +1053,9 @@ where F:FnMut(LlmDelta)->Result<(),String> + Send
     let mut buffer=String::new();
 
     while let Some(chunk)=stream.next().await{
+        if cancel_generation.load(Ordering::SeqCst) {
+            return Err("Generation stopped.".into());
+        }
         buffer.push_str(&String::from_utf8_lossy(&chunk.map_err(|e|e.to_string())?));
         while let Some(pos)=buffer.find('\n'){
             let line=buffer[..pos].trim_end_matches('\r').to_string();
@@ -1420,6 +1430,32 @@ fn inject_prompts(req:InjectRequest)->Result<Value,String>{
     Ok(w)
 }
 
+async fn interrupt_comfy(comfy_url:&str)->Result<(),String>{
+    let base=base_url(comfy_url);
+    let response=reqwest::Client::new()
+        .post(format!("{}/interrupt",base))
+        .send().await
+        .map_err(|e|e.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("ComfyUI interrupt returned HTTP {}",response.status()));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn stop_generation(
+    state:tauri::State<'_,AppState>,
+    comfy_url:Option<String>,
+)->Result<(),String>{
+    state.cancel_generation.store(true, Ordering::SeqCst);
+    if let Some(url)=comfy_url {
+        if !url.trim().is_empty() {
+            let _=interrupt_comfy(&url).await;
+        }
+    }
+    Ok(())
+}
+
 #[tauri::command]
 async fn submit_to_comfy(req:SubmitRequest)->Result<Value,String>{
     let response=reqwest::Client::new().post(format!("{}/prompt",base_url(&req.comfy_url))).json(&json!({"prompt":req.workflow,"client_id":"raphael-prompt-forge"})).send().await.map_err(|e|e.to_string())?;
@@ -1472,6 +1508,7 @@ async fn fetch_comfy_image(client:&reqwest::Client, base:&str, image:(String,Str
 
 async fn monitor_comfy_generation_inner<F>(
     req:MonitorComfyRequest,
+    cancel_generation:Arc<AtomicBool>,
     mut emit:F,
 )->Result<ComfyGenerationResult,String>
 where F:FnMut(ComfyProgress)->Result<(),String> + Send
@@ -1488,6 +1525,9 @@ where F:FnMut(ComfyProgress)->Result<(),String> + Send
     let _=emit(ComfyProgress{percent:0.0,current:0,total:1,node:None,status:"waiting".into()});
 
     loop{
+        if cancel_generation.load(Ordering::SeqCst) {
+            return Err("Generation stopped.".into());
+        }
         if let Some(history)=fetch_comfy_history(&client,&base,&req.prompt_id).await?{
             if let Some(image_ref)=first_comfy_image(&history){
                 let image_data_url=fetch_comfy_image(&client,&base,image_ref.clone()).await?;
@@ -1538,10 +1578,11 @@ where F:FnMut(ComfyProgress)->Result<(),String> + Send
 
 #[tauri::command]
 async fn monitor_comfy_generation(
+    state:tauri::State<'_,AppState>,
     req:MonitorComfyRequest,
     on_event:Channel<ComfyProgress>,
 )->Result<ComfyGenerationResult,String>{
-    monitor_comfy_generation_inner(req, |progress| {
+    monitor_comfy_generation_inner(req, state.cancel_generation.clone(), |progress| {
         on_event.send(progress).map_err(|e|format!("ComfyUI channel closed: {}",e))
     }).await
 }
@@ -1577,7 +1618,16 @@ async fn web_command(
     AxumJson(body):AxumJson<Value>,
 )->Response{
     if command=="stream_llm" {
+        state.cancel_generation.store(false, Ordering::SeqCst);
         return web_stream_llm(state.clone(), AxumJson(body)).await.into_response();
+    }
+    if command=="stop_generation" {
+        state.cancel_generation.store(true, Ordering::SeqCst);
+        let comfy_url=body.get("comfyUrl").and_then(|v|v.as_str()).unwrap_or("");
+        if !comfy_url.trim().is_empty() {
+            let _=interrupt_comfy(comfy_url).await;
+        }
+        return AxumJson(json!({"stopped":true})).into_response();
     }
     if command=="monitor_comfy_generation" {
         return web_monitor_comfy(AxumJson(body)).await.into_response();
@@ -1695,7 +1745,7 @@ async fn web_stream_llm(
                     let event=Event::default().json_data(json!({"text":delta.text,"done":false})).map_err(|e|format!("sse:{}",e))?;
                     tx2.send(Ok(event)).map_err(|_|"sse client disconnected".to_string())
                 };
-                match stream_llm_inner(req,&mut emit).await{
+                match stream_llm_inner(req,state.cancel_generation.clone(),&mut emit).await{
                     Ok(())=>{
                         let _=tx.send(Ok(Event::default().json_data(json!({"done":true})).unwrap_or_else(|_|Event::default())));
                     }
@@ -1725,7 +1775,7 @@ async fn web_monitor_comfy(
                     let event=Event::default().json_data(json!({"progress":progress})).map_err(|e|format!("sse:{}",e))?;
                     tx2.send(Ok(event)).map_err(|_|"sse client disconnected".to_string())
                 };
-                match monitor_comfy_generation_inner(req,&mut emit).await{
+                match monitor_comfy_generation_inner(req,state.cancel_generation.clone(),&mut emit).await{
                     Ok(result)=>{
                         let _=tx.send(Ok(Event::default().json_data(json!({"result":result,"done":true})).unwrap_or_else(|_|Event::default())));
                     }
@@ -1834,7 +1884,12 @@ async fn start_web_host(
         context_tokens: 32768,
     })));
     let generation_settings=Arc::new(Mutex::new(generation_settings.unwrap_or_else(||json!({}))));
-    let api_state=WebApiState{app:app.clone(),llm:llm.clone(),generation_settings:generation_settings.clone()};
+    let api_state=WebApiState{
+        app:app.clone(),
+        llm:llm.clone(),
+        generation_settings:generation_settings.clone(),
+        cancel_generation:state.cancel_generation.clone(),
+    };
     let router=Router::new()
         .route("/health", axum::routing::get(|| async {
             AxumJson(json!({"ok":true,"service":"raphael-prompt-forge"}))
@@ -1883,11 +1938,15 @@ async fn stop_web_host(state:tauri::State<'_,AppState>)->Result<(),String>{
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run(){
     tauri::Builder::default()
-        .manage(AppState{active_stream:Arc::new(Mutex::new(false)),web_host:Arc::new(Mutex::new(None))})
+        .manage(AppState{
+            active_stream:Arc::new(Mutex::new(false)),
+            cancel_generation:Arc::new(AtomicBool::new(false)),
+            web_host:Arc::new(Mutex::new(None)),
+        })
         .invoke_handler(tauri::generate_handler![
             pick_folder,discover_raphael_config,discover_raphael_roots,scan_library,list_provider_models,
             prepare_generation,stream_llm,parse_prompt_pair,finalize_prompt_pair,build_workflow,inject_prompts,
-            submit_to_comfy,monitor_comfy_generation,load_history,append_history,path_to_data_url,start_web_host,update_web_host_llm,update_web_host_generation_settings,stop_web_host
+            submit_to_comfy,monitor_comfy_generation,stop_generation,load_history,append_history,path_to_data_url,start_web_host,update_web_host_llm,update_web_host_generation_settings,stop_web_host
         ])
         .run(tauri::generate_context!())
         .expect("error while running Raphael Prompt Forge");
