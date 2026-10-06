@@ -1003,13 +1003,15 @@ function App(){
     [allLoras,manualLoraIds],
   );
 
-  const selectedCharacterLoraCount=useMemo(
-    ()=>selectedLoraIds.reduce((count,id)=>{
-      const lora=allLoras.find(item=>item.id===id);
-      return count+(lora && (lora.character || lora.tags.some(tag=>normUi(tag)==='character')) ? 1 : 0);
-    },0),
+  const selectedCharacterLoras=useMemo(
+    ()=>allLoras.filter(lora=>
+      selectedLoraIds.includes(lora.id) &&
+      (lora.character || lora.tags.some(tag=>normUi(tag)==='character'))
+    ),
     [allLoras,selectedLoraIds],
   );
+
+  const selectedCharacterLoraCount=selectedCharacterLoras.length;
 
   const filteredCheckpoints=useMemo(()=>{
     const q=checkpointSearch.trim().toLowerCase();
@@ -1600,7 +1602,9 @@ function App(){
         systemPromptValues,
       );
 
-      const characterLoras=prep.loras.filter(l=>l.character);
+      const characterLoras=prep.loras.filter(l=>
+        l.character || l.tags.some(tag=>normUi(tag)==='character')
+      );
       const selectedCharacterInputs:SelectedCharacterInput[]=characterLoras.map(l=>({
         name:l.name,
         description:l.description,
@@ -2126,16 +2130,19 @@ function App(){
                 <b>{plan.concept}</b>
               </div>
               <div className="planning-character-list">
-                <span>CHARACTERS · {plan.characters.length}</span>
-                {plan.characters.map((character,index)=>
-                  <div key={index} className="planning-character-card">
-                    <b>{index+1}. {character.name}</b>
-                    <small>GENDER: {character.gender}</small>
-                    <small>{character.appearance}</small>
-                    <small>POSE: {character.pose} · EXPRESSION: {character.expression}</small>
-                    <small>POSITION: {character.position} · {character.interaction}</small>
-                  </div>
-                )}
+                <span>CHARACTERS · {selectedCharacterLoras.length}</span>
+                {selectedCharacterLoras.map((lora,index)=>{
+                  const character=plan.characters[index];
+                  return (
+                    <div key={lora.id} className="planning-character-card">
+                      <b>{index+1}. {lora.name}</b>
+                      <small>GENDER: {character?.gender || 'unknown'}</small>
+                      <small>{character?.appearance || lora.description || 'character identity LoRA selected'}</small>
+                      <small>POSE: {character?.pose || plan.pose} · EXPRESSION: {character?.expression || plan.expression}</small>
+                      <small>POSITION: {character?.position || 'planned position'} · {character?.interaction || 'planned interaction'}</small>
+                    </div>
+                  );
+                })}
               </div>
               <div><span>ACTION</span><b>{plan.action}</b></div>
               <div><span>POSE</span><b>{plan.pose}</b></div>
