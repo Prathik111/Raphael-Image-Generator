@@ -1585,7 +1585,6 @@ function App(){
           ' | INTERACTION: '+character.interaction
         ),
         'ACTION: '+generationPlan.action,
-        'ACTION: '+generationPlan.action,
         'POSE: '+generationPlan.pose,
         'SETTING: '+generationPlan.setting,
         'BACKGROUND: '+generationPlan.background,
