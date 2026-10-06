@@ -180,6 +180,10 @@ SELECTED LoRA METADATA:
 SELECTED CHARACTER IDENTITY LoRAs:
 {{CHARACTERS}}
 
+OUTPUT REQUIREMENT:
+The JSON MUST contain a "characters" array with exactly {{CHARACTER_COUNT}} objects, one for each selected character LoRA.
+Never put multiple character names into a single "character" string.
+
 USER CONSTRAINTS:
 CHARACTER: {{CHARACTER}}
 SETTING: {{SETTING}}
@@ -594,22 +598,53 @@ function parseGenerationPlan(
   anchorType:PlannerAnchorType,
 ):GenerationPlan{
   const value=extractJsonObject(raw);
-  const rawCharacters=Array.isArray(value.characters) ? value.characters : [];
-  const characters:CharacterPlan[]=rawCharacters.map((item,index)=>{
-    const obj=item && typeof item==='object' ? item as Record<string,unknown> : {};
-    const fallbackLora=expectedCharacterLoras[index];
+  const rawCharacters=Array.isArray(value.characters)
+    ? value.characters
+    : [];
+
+  // Some locally persisted/older planner prompts still emit the legacy
+  // single "character" string. Normalize both legacy and current outputs
+  // into exactly one plan record per selected character LoRA.
+  const legacyCharacterNames=textField(value.character)
+    .split(/[\\n,|]+/)
+    .map(name=>name.trim())
+    .filter(Boolean);
+
+  const plannerItems:Record<string,unknown>[]=rawCharacters
+    .filter(item=>item && typeof item==='object')
+    .map(item=>item as Record<string,unknown>);
+
+  const characters:CharacterPlan[]=expectedCharacterLoras.map((fallbackLora,index)=>{
+    const obj=plannerItems[index] || {};
+    const legacyName=legacyCharacterNames[index];
+
     return {
-      name:textField(obj.name,fallbackLora?.name || 'Character '+(index+1)),
-      appearance:textField(obj.appearance,fallbackLora?.description || fallbackLora?.name || 'distinct character appearance'),
-      pose:textField(obj.pose,'natural pose'),
-      expression:textField(obj.expression,'calm expression'),
-      position:textField(obj.position,'balanced position'),
-      interaction:textField(obj.interaction,'independent presence'),
+      name:textField(
+        obj.name,
+        legacyName || fallbackLora.name || 'Character '+(index+1),
+      ),
+      appearance:textField(
+        obj.appearance,
+        fallbackLora.description || fallbackLora.name || 'distinct character appearance',
+      ),
+      pose:textField(
+        obj.pose,
+        textField(value.pose,'natural pose'),
+      ),
+      expression:textField(
+        obj.expression,
+        textField(value.expression,'calm expression'),
+      ),
+      position:textField(
+        obj.position,
+        index===0 ? 'primary position' : 'secondary position',
+      ),
+      interaction:textField(
+        obj.interaction,
+        index===0 ? 'leading the scene interaction' : 'interacting with the other characters',
+      ),
     };
   });
-  if(characters.length !== expectedCharacterLoras.length){
-    throw new Error('Planner returned '+characters.length+' characters, but '+expectedCharacterLoras.length+' character LoRAs are selected.');
-  }
   const character=textField(value.character,
     characters.map((item,index)=>'CHARACTER '+(index+1)+': '+item.name+' — '+item.appearance).join('\n')
       || fallback.character
@@ -1580,6 +1615,7 @@ function App(){
         LORA_METADATA:loraMetadata,
         CHARACTERS:characterMetadata,
         CHARACTER:characterMetadata,
+        CHARACTER_COUNT:String(characterLoras.length),
         SETTING:prep.scene.setting,
         POSE:prep.scene.pose,
         EXPRESSION:prep.scene.expression,
