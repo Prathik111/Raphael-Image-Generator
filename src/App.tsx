@@ -170,6 +170,10 @@ const defaultPlanningPrompt = `GENERATION INPUT FOR THE PLANNER
 CHECKPOINT: {{CHECKPOINT}}
 BASE: {{BASE}}
 
+SCENE ANCHOR CATEGORY: {{SCENE_ANCHOR_TYPE}}
+The planner must choose one concrete anchor value in this category first.
+All other scene fields must be derived from that single anchor.
+
 SELECTED LoRA METADATA:
 {{LORA_METADATA}}
 
@@ -291,12 +295,19 @@ function loadPersistedGenerationSettings(): StoredGenerationSettings {
       migrated.expansionPromptTemplate=defaultExpansionPromptTemplate;
     }
 
-    migrated.plannerSystemPrompt =
+    const persistedPlannerPrompt =
       typeof migrated.plannerSystemPrompt==='string'
-        && migrated.plannerSystemPrompt.trim()
-        && !/Return JSON only with exactly these string fields:\s*character, action, pose/i.test(migrated.plannerSystemPrompt)
-        ? migrated.plannerSystemPrompt
-        : defaultPlannerSystemPrompt;
+        ? migrated.plannerSystemPrompt.trim()
+        : '';
+
+    migrated.plannerSystemPrompt =
+      !persistedPlannerPrompt
+        || /Return JSON only with exactly these string fields:\s*character, action, pose/i.test(persistedPlannerPrompt)
+        ? defaultPlannerSystemPrompt
+        : persistedPlannerPrompt.includes('SCENE-COHERENCE METHOD:')
+          ? persistedPlannerPrompt
+          : persistedPlannerPrompt
+            + '\\n\\nSCENE-COHERENCE METHOD (required): Choose one concrete scene anchor first, using the SCENE ANCHOR CATEGORY supplied by the application. Derive every other scene field from that anchor. Do not independently randomize pose, setting, background, expression, lighting, clothing, composition, camera, or framing. Every field must describe one coherent moment. Explicit user constraints override the anchor category; adapt the rest of the scene around them.';
     migrated.tagSystemPrompt =
       typeof migrated.tagSystemPrompt==='string' && migrated.tagSystemPrompt.trim()
         ? migrated.tagSystemPrompt
