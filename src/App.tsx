@@ -15,6 +15,7 @@ type Status = 'idle' | 'running' | 'done' | 'error';
 
 interface CharacterPlan {
   name: string;
+  gender: string;
   appearance: string;
   pose: string;
   expression: string;
@@ -95,11 +96,13 @@ Never produce a collection of unrelated "random" choices. The result must read a
 
 If 2 character LoRAs are selected, return exactly 2 character objects.
 Each character object must contain:
-name, appearance, pose, expression, position, interaction.
+name, gender, appearance, pose, expression, position, interaction.
 
 If multiple character LoRAs are selected, NEVER merge them into one character.
 If 2 character LoRAs are selected, return exactly 2 character objects.
 If 3 character LoRAs are selected, return exactly 3 character objects.
+The "gender" field must state the known/established gender of the character when available. Use concise values such as "female", "male", "non-binary", or "unknown"; never invent an unsupported gender.
+
 Preserve the identity and documented purpose of every selected character LoRA.
 
 Use short canonical visual choices, preferably 1-6 words per field.
@@ -309,7 +312,9 @@ function loadPersistedGenerationSettings(): StoredGenerationSettings {
         || /Return JSON only with exactly these string fields:\s*character, action, pose/i.test(persistedPlannerPrompt)
         ? defaultPlannerSystemPrompt
         : persistedPlannerPrompt.includes('SCENE-COHERENCE METHOD:')
-          ? persistedPlannerPrompt
+          ? persistedPlannerPrompt.includes('gender, appearance, pose')
+            ? persistedPlannerPrompt
+            : persistedPlannerPrompt + '\n\nCHARACTER SCHEMA UPDATE (required): Each character object must contain name, gender, appearance, pose, expression, position, interaction. Never omit gender; use a known concise value or "unknown".'
           : persistedPlannerPrompt
             + '\n\nSCENE-COHERENCE METHOD (required): Choose one concrete scene anchor first, using the SCENE ANCHOR CATEGORY supplied by the application. Derive every other scene field from that anchor. Do not independently randomize pose, setting, background, expression, lighting, clothing, composition, camera, or framing. Every field must describe one coherent moment. Explicit user constraints override the anchor category; adapt the rest of the scene around them.';
     migrated.tagSystemPrompt =
@@ -622,6 +627,10 @@ function parseGenerationPlan(
       name:textField(
         obj.name,
         legacyName || fallbackLora.name || 'Character '+(index+1),
+      ),
+      gender:textField(
+        obj.gender,
+        'unknown',
       ),
       appearance:textField(
         obj.appearance,
@@ -1645,6 +1654,7 @@ function App(){
         ...basePromptValues,
         CHARACTER:generationPlan.characters.map((character,index)=>
           'CHARACTER '+(index+1)+': '+character.name+
+          ' | GENDER: '+character.gender+
           ' | APPEARANCE: '+character.appearance+
           ' | POSE: '+character.pose+
           ' | EXPRESSION: '+character.expression+
@@ -1653,6 +1663,7 @@ function App(){
         ).join('\n'),
         CHARACTERS:generationPlan.characters.map((character,index)=>
           'CHARACTER '+(index+1)+': '+character.name+
+          ' | GENDER: '+character.gender+
           ' | APPEARANCE: '+character.appearance+
           ' | POSE: '+character.pose+
           ' | EXPRESSION: '+character.expression+
@@ -1683,6 +1694,7 @@ function App(){
         'CHARACTERS:',
         ...generationPlan.characters.map((character,index)=>
           'CHARACTER '+(index+1)+': '+character.name+
+          ' | GENDER: '+character.gender+
           ' | APPEARANCE: '+character.appearance+
           ' | POSE: '+character.pose+
           ' | EXPRESSION: '+character.expression+
@@ -2118,6 +2130,7 @@ function App(){
                 {plan.characters.map((character,index)=>
                   <div key={index} className="planning-character-card">
                     <b>{index+1}. {character.name}</b>
+                    <small>GENDER: {character.gender}</small>
                     <small>{character.appearance}</small>
                     <small>POSE: {character.pose} · EXPRESSION: {character.expression}</small>
                     <small>POSITION: {character.position} · {character.interaction}</small>
