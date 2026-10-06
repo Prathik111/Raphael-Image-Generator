@@ -804,8 +804,6 @@ async fn list_provider_models(settings:LlmSettings)->Result<Vec<String>,String>{
     Ok(data.iter().filter_map(|m|m.get("name").or_else(||m.get("id")).and_then(|x|x.as_str()).map(str::to_string)).collect())
 }
 
-fn random_one(values:&[&str])->String{values.choose(&mut rand::rng()).unwrap_or(&"").to_string()}
-
 fn default_max_character_loras() -> u32 { 1 }
 
 fn registry_model_id(id: &str) -> &str {
@@ -961,13 +959,15 @@ async fn prepare_generation(req: PrepareRequest) -> Result<PreparedGeneration, S
         base_model: lora.base_model.clone(),
     }).collect();
 
+    // Leave unspecified scene fields empty so the planner, not preparation-time
+    // independent randomization, chooses a coherent scene around one creative anchor.
     let scene = SceneSelection {
-        setting: if req.setting.trim().is_empty() { random_one(&["rooftop at blue hour","rainy neon alley","quiet shrine at dawn","sunlit train platform","moonlit forest clearing","coastal city street after rain"]) } else { req.setting.trim().into() },
-        pose: if req.pose.trim().is_empty() { random_one(&["standing naturally","walking forward","sitting with one knee raised","looking over the shoulder","dynamic three-quarter pose","leaning against a wall"]) } else { req.pose.trim().into() },
-        expression: if req.expression.trim().is_empty() { random_one(&["soft smile","confident","curious","slightly mischievous","calm","surprised"]) } else { req.expression.trim().into() },
+        setting: req.setting.trim().into(),
+        pose: req.pose.trim().into(),
+        expression: req.expression.trim().into(),
         character: character.name.clone(),
-        dress: if req.dress.trim().is_empty() { random_one(&["modern casual outfit","layered streetwear","school uniform","elegant dress","light summer clothes","fantasy-inspired outfit"]) } else { req.dress.trim().into() },
-        composition: if req.composition.trim().is_empty() { random_one(&["full body","three-quarter shot","medium shot","cinematic wide shot","portrait crop"]) } else { req.composition.trim().into() },
+        dress: req.dress.trim().into(),
+        composition: req.composition.trim().into(),
     };
 
     Ok(PreparedGeneration { checkpoint: req.checkpoint, loras, scene, compatibility_keys: keys })
