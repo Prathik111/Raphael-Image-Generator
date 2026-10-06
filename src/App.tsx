@@ -1414,6 +1414,13 @@ function App(){
     if(busy || !selected || !library) return false;
     setBusy(true);
     setError('');
+    try{
+      await apiInvoke('start_generation');
+    }catch(e){
+      setBusy(false);
+      setError('Could not start generation: '+String(e));
+      return false;
+    }
     setToast('');
     setComfyProgress(0);
     setComfyCurrentStep(0);
