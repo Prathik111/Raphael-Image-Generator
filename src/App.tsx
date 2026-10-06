@@ -22,9 +22,14 @@ interface CharacterPlan {
   interaction: string;
 }
 
+type PlannerAnchorType = 'concept' | 'action' | 'setting' | 'background' | 'pose' | 'composition' | 'lighting';
+
 interface GenerationPlan {
   characters: CharacterPlan[];
   character: string;
+  concept: string;
+  anchorType: PlannerAnchorType;
+  anchor: string;
   action: string;
   pose: string;
   setting: string;
@@ -72,9 +77,23 @@ Do not generate the final positive or negative prompt.
 Do not write prose, narrative descriptions, metaphors, or image-model prompt tags.
 
 Return JSON only with exactly these fields:
-characters, action, pose, setting, background, expression, dress, composition, lighting, camera, framing.
+characters, concept, action, pose, setting, background, expression, dress, composition, lighting, camera, framing.
 
 "characters" must be an array with exactly one object for EVERY selected CHARACTER IDENTITY LoRA.
+
+SCENE-COHERENCE METHOD:
+The application supplies one SCENE ANCHOR CATEGORY. Use that category as the primary creative decision.
+First choose one concrete anchor value for that category. Then derive every other scene field so it naturally fits that anchor.
+Do NOT choose pose, setting, background, expression, lighting, clothing, composition, camera, or framing independently.
+Every downstream choice must support the same moment, place, action, mood, time, weather, and visual logic.
+If the anchor is a pose, choose an environment/action that makes that pose plausible.
+If the anchor is a background, choose setting, lighting, action, pose, composition, and camera that make that background plausible.
+If the anchor is an action, choose character placement, pose, expression, setting, background, composition, lighting, and camera that support that action.
+If the anchor is a concept, treat the concept as the scene's central idea and make every field a consequence of it.
+Explicit user constraints always override the random anchor category; adapt the rest of the scene around those constraints.
+Never produce a collection of unrelated "random" choices. The result must read as one coherent photograph or illustration taken at one specific moment.
+
+If 2 character LoRAs are selected, return exactly 2 character objects.
 Each character object must contain:
 name, appearance, pose, expression, position, interaction.
 
@@ -542,7 +561,27 @@ function textField(value:unknown,fallback=''):string{
   return typeof value==='string' ? value.trim() : fallback;
 }
 
-function parseGenerationPlan(raw:string, fallback:SceneSelection, expectedCharacterLoras:SelectedCharacterInput[]):GenerationPlan{
+function pickPlannerAnchorType(constraints:Constraints):PlannerAnchorType{
+  const candidates:Array<{type:PlannerAnchorType;locked:boolean}>= [
+    {type:'concept',locked:false},
+    {type:'action',locked:false},
+    {type:'setting',locked:Boolean(constraints.setting.trim())},
+    {type:'background',locked:false},
+    {type:'pose',locked:Boolean(constraints.pose.trim())},
+    {type:'composition',locked:Boolean(constraints.composition.trim())},
+    {type:'lighting',locked:false},
+  ];
+  const open=candidates.filter(candidate=>!candidate.locked);
+  const pool=open.length ? open : candidates;
+  return pool[Math.floor(Math.random()*pool.length)].type;
+}
+
+function parseGenerationPlan(
+  raw:string,
+  fallback:SceneSelection,
+  expectedCharacterLoras:SelectedCharacterInput[],
+  anchorType:PlannerAnchorType,
+):GenerationPlan{
   const value=extractJsonObject(raw);
   const rawCharacters=Array.isArray(value.characters) ? value.characters : [];
   const characters:CharacterPlan[]=rawCharacters.map((item,index)=>{
@@ -564,21 +603,36 @@ function parseGenerationPlan(raw:string, fallback:SceneSelection, expectedCharac
     characters.map((item,index)=>'CHARACTER '+(index+1)+': '+item.name+' — '+item.appearance).join('\n')
       || fallback.character
   );
-  const plan:GenerationPlan={
+  const planFields={
     characters,
     character,
-    action:textField(value.action,'natural pose'),
-    pose:textField(value.pose,fallback.pose),
-    setting:textField(value.setting,fallback.setting),
-    background:textField(value.background,fallback.setting),
-    expression:textField(value.expression,fallback.expression),
-    dress:textField(value.dress,fallback.dress),
-    composition:textField(value.composition,fallback.composition),
-    lighting:textField(value.lighting,'soft cinematic lighting'),
-    camera:textField(value.camera,'eye level camera'),
-    framing:textField(value.framing,fallback.composition),
+    concept:textField(value.concept,'coherent visual concept'),
+    action:textField(value.action,'coherent action'),
+    pose:textField(value.pose,fallback.pose || 'natural pose'),
+    setting:textField(value.setting,fallback.setting || 'coherent setting'),
+    background:textField(value.background,'coherent background'),
+    expression:textField(value.expression,fallback.expression || 'natural expression'),
+    dress:textField(value.dress,fallback.dress || 'coherent outfit'),
+    composition:textField(value.composition,fallback.composition || 'balanced composition'),
+    lighting:textField(value.lighting,'lighting consistent with the anchor'),
+    camera:textField(value.camera,'camera suited to the anchor'),
+    framing:textField(value.framing,fallback.composition || 'framing suited to the anchor'),
   };
-  const missing=Object.entries(plan).filter(([,v])=>!v.trim()).map(([k])=>k);
+  const anchorValues:Record<PlannerAnchorType,string>={
+    concept:planFields.concept,
+    action:planFields.action,
+    setting:planFields.setting,
+    background:planFields.background,
+    pose:planFields.pose,
+    composition:planFields.composition,
+    lighting:planFields.lighting,
+  };
+  const plan:GenerationPlan={
+    ...planFields,
+    anchorType,
+    anchor:anchorValues[anchorType],
+  };
+  const missing=Object.entries(plan).filter(([,v])=>typeof v==='string' && !v.trim()).map(([k])=>k);
   if(missing.length) throw new Error('Planning response is missing: '+missing.join(', '));
   return plan;
 }
@@ -1506,9 +1560,11 @@ function App(){
           ).join('\n\n')
         : '(none selected)';
 
+      const plannerAnchorType=pickPlannerAnchorType(constraints);
       const basePromptValues={
         CHECKPOINT:prep.checkpoint.name,
         BASE:prep.checkpoint.baseModel || 'unknown',
+        SCENE_ANCHOR_TYPE:plannerAnchorType,
         COMPATIBILITY:prep.compatibilityKeys.join(', '),
         LORA_METADATA:loraMetadata,
         CHARACTERS:characterMetadata,
@@ -1534,7 +1590,7 @@ function App(){
         flushSync(()=>setPlanStream(streamText.current));
       });
 
-      const generationPlan=parseGenerationPlan(streamText.current,prep.scene,selectedCharacterInputs);
+      const generationPlan=parseGenerationPlan(streamText.current,prep.scene,selectedCharacterInputs,plannerAnchorType);
       setPlan(generationPlan);
       setStageStatus('planning','done');
 
@@ -1575,6 +1631,8 @@ function App(){
       setPrompts(null);
       const plannedDecisionBlock=[
         'PLANNED GENERATION DECISION:',
+        'SCENE ANCHOR ['+generationPlan.anchorType.toUpperCase()+']: '+generationPlan.anchor,
+        'CENTRAL CONCEPT: '+generationPlan.concept,
         'CHARACTERS:',
         ...generationPlan.characters.map((character,index)=>
           'CHARACTER '+(index+1)+': '+character.name+
@@ -1584,6 +1642,7 @@ function App(){
           ' | POSITION: '+character.position+
           ' | INTERACTION: '+character.interaction
         ),
+        'CONCEPT: '+generationPlan.concept,
         'ACTION: '+generationPlan.action,
         'POSE: '+generationPlan.pose,
         'SETTING: '+generationPlan.setting,
@@ -1999,6 +2058,14 @@ function App(){
               {planStream ? <pre>{planStream}</pre> : <div className="stream-placeholder"><Terminal size={18}/><span>Planning decision will stream here first.</span></div>}
             </div>
             {plan && <div className="planning-grid">
+              <div>
+                <span>SCENE ANCHOR · {plan.anchorType.toUpperCase()}</span>
+                <b>{plan.anchor}</b>
+              </div>
+              <div>
+                <span>CENTRAL CONCEPT</span>
+                <b>{plan.concept}</b>
+              </div>
               <div className="planning-character-list">
                 <span>CHARACTERS · {plan.characters.length}</span>
                 {plan.characters.map((character,index)=>
