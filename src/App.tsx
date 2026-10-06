@@ -307,7 +307,7 @@ function loadPersistedGenerationSettings(): StoredGenerationSettings {
         : persistedPlannerPrompt.includes('SCENE-COHERENCE METHOD:')
           ? persistedPlannerPrompt
           : persistedPlannerPrompt
-            + '\\n\\nSCENE-COHERENCE METHOD (required): Choose one concrete scene anchor first, using the SCENE ANCHOR CATEGORY supplied by the application. Derive every other scene field from that anchor. Do not independently randomize pose, setting, background, expression, lighting, clothing, composition, camera, or framing. Every field must describe one coherent moment. Explicit user constraints override the anchor category; adapt the rest of the scene around them.';
+            + '\n\nSCENE-COHERENCE METHOD (required): Choose one concrete scene anchor first, using the SCENE ANCHOR CATEGORY supplied by the application. Derive every other scene field from that anchor. Do not independently randomize pose, setting, background, expression, lighting, clothing, composition, camera, or framing. Every field must describe one coherent moment. Explicit user constraints override the anchor category; adapt the rest of the scene around them.';
     migrated.tagSystemPrompt =
       typeof migrated.tagSystemPrompt==='string' && migrated.tagSystemPrompt.trim()
         ? migrated.tagSystemPrompt
