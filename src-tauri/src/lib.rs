@@ -984,7 +984,6 @@ async fn stream_llm(
         if *busy{return Err("An LLM stream is already active.".into())}
         *busy=true;
     }
-    state.cancel_generation.store(false, Ordering::SeqCst);
     let cancel_generation=state.cancel_generation.clone();
     let result=stream_llm_inner(req, cancel_generation, |delta| {
         on_event.send(delta).map_err(|e|format!("LLM stream channel closed: {}",e))
@@ -1443,6 +1442,14 @@ async fn interrupt_comfy(comfy_url:&str)->Result<(),String>{
 }
 
 #[tauri::command]
+async fn start_generation(
+    state:tauri::State<'_,AppState>,
+)->Result<(),String>{
+    state.cancel_generation.store(false, Ordering::SeqCst);
+    Ok(())
+}
+
+#[tauri::command]
 async fn stop_generation(
     state:tauri::State<'_,AppState>,
     comfy_url:Option<String>,
@@ -1617,8 +1624,11 @@ async fn web_command(
     AxumPath(command):AxumPath<String>,
     AxumJson(body):AxumJson<Value>,
 )->Response{
-    if command=="stream_llm" {
+    if command=="start_generation" {
         state.cancel_generation.store(false, Ordering::SeqCst);
+        return AxumJson(json!({"started":true})).into_response();
+    }
+    if command=="stream_llm" {
         return web_stream_llm(state.clone(), AxumJson(body)).await.into_response();
     }
     if command=="stop_generation" {
@@ -1656,6 +1666,17 @@ async fn web_command(
         "get_host_generation_settings"=>{
             let generation_settings=public_generation_settings(&*state.generation_settings.lock().await);
             serde_json::to_value(generation_settings).map_err(|e|e.to_string())
+        }
+        "submit_to_comfy"=>{
+            if state.cancel_generation.load(Ordering::SeqCst) {
+                return Err("Generation stopped.".into());
+            }
+            let request:SubmitRequest=serde_json::from_value(req_value).map_err(|e|e.to_string())?;
+            let result=submit_to_comfy(request).await?;
+            if state.cancel_generation.load(Ordering::SeqCst) {
+                return Err("Generation stopped.".into());
+            }
+            Ok(result)
         }
         "update_web_host_generation_settings"=>{
             let settings_value=body.get("generationSettings").cloned().unwrap_or(req_value);
@@ -1947,7 +1968,7 @@ pub fn run(){
         .invoke_handler(tauri::generate_handler![
             pick_folder,discover_raphael_config,discover_raphael_roots,scan_library,list_provider_models,
             prepare_generation,stream_llm,parse_prompt_pair,finalize_prompt_pair,build_workflow,inject_prompts,
-            submit_to_comfy,monitor_comfy_generation,stop_generation,load_history,append_history,path_to_data_url,start_web_host,update_web_host_llm,update_web_host_generation_settings,stop_web_host
+            submit_to_comfy,monitor_comfy_generation,start_generation,stop_generation,load_history,append_history,path_to_data_url,start_web_host,update_web_host_llm,update_web_host_generation_settings,stop_web_host
         ])
         .run(tauri::generate_context!())
         .expect("error while running Raphael Prompt Forge");
