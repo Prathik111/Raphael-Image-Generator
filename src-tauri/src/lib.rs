@@ -2606,7 +2606,15 @@ mod tests {
         let image = "data:image/png;base64,AQID";
         append_history_file(
             &path,
-            json!({"id":"generation-lazy-image-test","imageDataUrl":image,"checkpoint":{"name":"test"}}),
+            json!({
+                "id":"generation-lazy-image-test",
+                "imageDataUrl":image,
+                "checkpoint":{"name":"test"},
+                "positivePrompt":"full positive prompt",
+                "negativePrompt":"full negative prompt",
+                "workflow":{"node":"workflow-payload"},
+                "generationSettings":{"systemPrompt":"large settings payload"}
+            }),
         ).expect("history append should succeed");
 
         let stored = std::fs::read_to_string(&path).expect("read compact history");
@@ -2619,6 +2627,10 @@ mod tests {
         assert_eq!(index.len(), 1);
         assert_eq!(index[0].payload["hasImage"], true);
         assert!(index[0].payload.get("imageDataUrl").is_none());
+        assert!(index[0].payload.get("positivePrompt").is_none());
+        assert!(index[0].payload.get("negativePrompt").is_none());
+        assert!(index[0].payload.get("workflow").is_none());
+        assert!(index[0].payload.get("generationSettings").is_none());
 
         assert_eq!(
             load_history_image_file(&path, "generation-lazy-image-test")
@@ -2627,7 +2639,12 @@ mod tests {
         );
         let item = load_history_item_file(&path, "generation-lazy-image-test")
             .expect("load full history item");
-        assert_eq!(item["imageDataUrl"], image);
+        assert_eq!(item["hasImage"], true);
+        assert!(item.get("imageDataUrl").is_none());
+        assert_eq!(item["positivePrompt"], "full positive prompt");
+        assert_eq!(item["negativePrompt"], "full negative prompt");
+        assert_eq!(item["workflow"]["node"], "workflow-payload");
+        assert_eq!(item["generationSettings"]["systemPrompt"], "large settings payload");
     }
 
     #[test]
