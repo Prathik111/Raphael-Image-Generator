@@ -501,6 +501,17 @@ async function withThumbnailConcurrency<T>(task:()=>Promise<T>):Promise<T>{
 
 const historyImageCache=new Map<string,string>();
 const historyImagePending=new Map<string,Promise<string|null>>();
+function rememberHistoryImage(id:string,dataUrl:string):void{
+  historyImageCache.delete(id);
+  historyImageCache.set(id,dataUrl);
+  // Generated images are much larger than model thumbnails; retain only a
+  // small recent working set to avoid keeping every image in JS memory.
+  while(historyImageCache.size>12){
+    const oldest=historyImageCache.keys().next().value;
+    if(oldest===undefined) break;
+    historyImageCache.delete(oldest);
+  }
+}
 async function fetchHistoryImageCached(id:string):Promise<string|null>{
   const cached=historyImageCache.get(id);
   if(cached) return cached;
@@ -509,7 +520,7 @@ async function fetchHistoryImageCached(id:string):Promise<string|null>{
   const request=apiInvoke<string|null>('load_history_image',{id})
     .then(url=>{
       if(typeof url==='string' && url.startsWith('data:image/')){
-        historyImageCache.set(id,url);
+        rememberHistoryImage(id,url);
         return url;
       }
       return null;
@@ -523,6 +534,24 @@ type ThumbnailState = 'loading' | 'ready' | 'error';
 
 const thumbnailCache = new Map<string,string>();
 const thumbnailPending = new Map<string,Promise<string>>();
+const maxThumbnailMemoryEntries=80;
+function cachedThumbnail(reference:string):string|undefined{
+  const value=thumbnailCache.get(reference);
+  if(value){
+    thumbnailCache.delete(reference);
+    thumbnailCache.set(reference,value);
+  }
+  return value;
+}
+function rememberThumbnail(reference:string,dataUrl:string):void{
+  thumbnailCache.delete(reference);
+  thumbnailCache.set(reference,dataUrl);
+  while(thumbnailCache.size>maxThumbnailMemoryEntries){
+    const oldest=thumbnailCache.keys().next().value;
+    if(oldest===undefined) break;
+    thumbnailCache.delete(oldest);
+  }
+}
 const thumbnailDbName='raphael-image-generator-thumbnails';
 const thumbnailStoreName='thumbnails';
 const librarySnapshotStoreName='librarySnapshots';
@@ -649,7 +678,7 @@ function thumbnailReferences(reference?:string):string[]{
 }
 
 async function fetchModelThumbnailReference(reference:string):Promise<string>{
-  const cached = thumbnailCache.get(reference);
+  const cached = cachedThumbnail(reference);
   if(cached) return cached;
   const pending = thumbnailPending.get(reference);
   if(pending) return pending;
@@ -657,7 +686,7 @@ async function fetchModelThumbnailReference(reference:string):Promise<string>{
   const request = (async()=>{
     const persisted=await readPersistedThumbnail(reference);
     if(persisted){
-      thumbnailCache.set(reference,persisted);
+      rememberThumbnail(reference,persisted);
       return persisted;
     }
     return withThumbnailConcurrency(async()=>{
@@ -668,7 +697,7 @@ async function fetchModelThumbnailReference(reference:string):Promise<string>{
           if(!url || !url.startsWith('data:image/')){
             throw new Error('Registry returned an invalid thumbnail response.');
           }
-          thumbnailCache.set(reference,url);
+          rememberThumbnail(reference,url);
           void persistThumbnail(reference,url);
           return url;
         }catch(error){
@@ -2347,7 +2376,7 @@ function App(){
         comfyPromptId:promptId,
       };
       await apiInvoke('append_history',{payload:record});
-      if(generatedImageDataUrl) historyImageCache.set(record.id,generatedImageDataUrl);
+      if(generatedImageDataUrl) rememberHistoryImage(record.id,generatedImageDataUrl);
       historyRevisionRef.current=await apiInvoke<string>('history_revision').catch(()=>historyRevisionRef.current);
       setHistory(x=>[record,...x].slice(0,100));
       selectedHistoryRequestRef.current=record.id;
