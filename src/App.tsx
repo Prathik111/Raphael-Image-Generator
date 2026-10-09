@@ -980,6 +980,8 @@ function App(){
   const [resultFilename,setResultFilename]=useState('');
 
   const streamText=useRef('');
+  // Protect in-progress LAN edits from an older host-settings poll response.
+  const generationSettingsEditedAt=useRef(0);
 
   const selected=useMemo(
     ()=>library?.checkpoints.find(x=>x.id===selectedId) || library?.checkpoints[0],
@@ -1232,6 +1234,7 @@ function App(){
     // The desktop host publishes its settings while hosting; LAN clients also
     // write intentional settings changes back to that same host-side store.
     if(isTauriRuntime ? !webHost : !lanClientReady) return;
+    if(!isTauriRuntime) generationSettingsEditedAt.current=Date.now();
     const timeout=window.setTimeout(()=>{
       void apiInvoke('update_web_host_generation_settings',{generationSettings:generationDraft})
         .catch(e=>setWebHostError('Could not sync generation settings with the host: '+String(e)));
@@ -1245,6 +1248,9 @@ function App(){
       try{
         const hostGeneration=await apiInvoke<Partial<StoredGenerationSettings>>('get_host_generation_settings');
         setGenerationDraft(current=>{
+          // A poll that started before a local edit must not revert that edit
+          // before its debounced write reaches the host.
+          if(Date.now()-generationSettingsEditedAt.current<2000) return current;
           const currentSignature=JSON.stringify({
             plannerSystemPrompt:current.plannerSystemPrompt,
             tagSystemPrompt:current.tagSystemPrompt,
