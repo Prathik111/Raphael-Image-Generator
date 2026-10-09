@@ -1745,6 +1745,15 @@ async fn web_command(
         }
         "history_revision"=>serde_json::to_value(history_revision(state.app.clone()).await?).map_err(|e|e.to_string()),
         "load_history"=>serde_json::to_value(load_history(state.app.clone()).await?).map_err(|e|e.to_string()),
+        "load_history_index"=>serde_json::to_value(load_history_index(state.app.clone()).await?).map_err(|e|e.to_string()),
+        "load_history_item"=>{
+            let id=req_value.get("id").and_then(Value::as_str).ok_or_else(||"history item id is required".to_string())?;
+            serde_json::to_value(load_history_item(state.app.clone(),id.to_string()).await?).map_err(|e|e.to_string())
+        }
+        "load_history_image"=>{
+            let id=req_value.get("id").and_then(Value::as_str).ok_or_else(||"history image id is required".to_string())?;
+            serde_json::to_value(load_history_image(state.app.clone(),id.to_string()).await?).map_err(|e|e.to_string())
+        }
         "append_history"=>{
             let payload=body.get("payload").cloned().unwrap_or(Value::Null);
             serde_json::to_value(append_history(state.app.clone(),payload).await?).map_err(|e|e.to_string())
@@ -1855,32 +1864,187 @@ fn history_revision_file(path:&Path)->Result<String,String>{
     Ok(format!("{}:{}",metadata.len(),modified))
 }
 
-fn load_history_file(path:&Path)->Result<Vec<HistoryRecord>,String>{
-    let _guard=HISTORY_FILE_LOCK.lock()
-        .map_err(|_|"Generation history lock is poisoned.".to_string())?;
-    if !path.exists(){return Ok(vec![]);}
-    serde_json::from_slice(&fs::read(path).map_err(|e|e.to_string())?)
-        .map_err(|e|format!("Could not read generation history JSON: {e}"))
+fn history_images_dir(path:&Path)->PathBuf{
+    path.parent().unwrap_or_else(||Path::new(".")).join("generation-history-images")
 }
 
-fn append_history_file(path:&Path,payload:Value)->Result<HistoryRecord,String>{
-    let _guard=HISTORY_FILE_LOCK.lock()
-        .map_err(|_|"Generation history lock is poisoned.".to_string())?;
-    let mut all:Vec<HistoryRecord>=if path.exists(){
-        serde_json::from_slice(&fs::read(path).map_err(|e|e.to_string())?)
-            .map_err(|e|format!("Could not read existing generation history JSON; refusing to overwrite it: {e}"))?
-    }else{
-        vec![]
-    };
-    let rec=HistoryRecord{id:now_id(),timestamp:now_id(),payload};
-    all.insert(0,rec.clone());
-    if all.len()>100{all.truncate(100);}
-    let serialized=serde_json::to_vec_pretty(&all).map_err(|e|e.to_string())?;
+fn history_image_extension(mime:&str)->(&'static str,&'static str){
+    match mime.to_ascii_lowercase().as_str(){
+        "image/jpeg"|"image/jpg"=>("jpg","image/jpeg"),
+        "image/webp"=>("webp","image/webp"),
+        "image/gif"=>("gif","image/gif"),
+        _=>("png","image/png"),
+    }
+}
+
+fn store_history_image(path:&Path,data_url:&str)->Result<Option<String>,String>{
+    let Some((header,encoded))=data_url.split_once(',') else{return Ok(None)};
+    if !header.starts_with("data:") || !header.contains(";base64"){return Ok(None);}
+    let mime=header[5..].split(';').next().unwrap_or("image/png");
+    let (extension,_)=history_image_extension(mime);
+    let Ok(bytes)=base64::engine::general_purpose::STANDARD.decode(encoded) else{return Ok(None)};
+    let directory=history_images_dir(path);
+    fs::create_dir_all(&directory).map_err(|e|format!("Could not create history image directory: {e}"))?;
+    let filename=format!("{}.{}",now_id(),extension);
+    fs::write(directory.join(&filename),bytes).map_err(|e|format!("Could not save generated history image: {e}"))?;
+    Ok(Some(filename))
+}
+
+fn write_history_records_file(path:&Path,records:&[HistoryRecord])->Result<(),String>{
+    let serialized=serde_json::to_vec(records).map_err(|e|e.to_string())?;
     let temp=path.with_file_name(format!("generation-history-{}.tmp",now_id()));
     fs::write(&temp,serialized).map_err(|e|format!("Could not write temporary generation history: {e}"))?;
     if let Err(error)=fs::rename(&temp,path){
         let _=fs::remove_file(&temp);
         return Err(format!("Could not replace generation history file: {error}"));
+    }
+    Ok(())
+}
+
+fn read_history_records_file(path:&Path)->Result<Vec<HistoryRecord>,String>{
+    if !path.exists(){return Ok(vec![]);}
+    serde_json::from_slice(&fs::read(path).map_err(|e|e.to_string())?)
+        .map_err(|e|format!("Could not read generation history JSON: {e}"))
+}
+
+// One-time migration: older history entries stored complete base64 images inside
+// generation-history.json. Move valid image data into sidecar files so subsequent
+// history reads and appends touch only compact metadata.
+fn migrate_history_images(path:&Path,records:&mut [HistoryRecord])->Result<bool,String>{
+    let mut changed=false;
+    for record in records.iter_mut(){
+        if record.payload.get("_historyImageFile").and_then(Value::as_str).is_some(){continue;}
+        let Some(data_url)=record.payload.get("imageDataUrl").and_then(Value::as_str).map(str::to_string) else{continue};
+        if let Some(filename)=store_history_image(path,&data_url)?{
+            if let Some(object)=record.payload.as_object_mut(){
+                object.remove("imageDataUrl");
+                object.insert("_historyImageFile".into(),Value::String(filename));
+                changed=true;
+            }
+        }
+    }
+    if changed{write_history_records_file(path,records)?;}
+    Ok(changed)
+}
+
+fn history_image_data_url(path:&Path,filename:&str)->Option<String>{
+    // The file name is generated by this application; reject path components
+    // in persisted metadata to prevent a malformed history file escaping its directory.
+    if Path::new(filename).file_name()?.to_str()?!=filename{return None;}
+    let bytes=fs::read(history_images_dir(path).join(filename)).ok()?;
+    let extension=Path::new(filename).extension().and_then(|x|x.to_str()).unwrap_or("png");
+    let mime=match extension.to_ascii_lowercase().as_str(){
+        "jpg"|"jpeg"=>"image/jpeg",
+        "webp"=>"image/webp",
+        "gif"=>"image/gif",
+        _=>"image/png",
+    };
+    Some(format!("data:{};base64,{}",mime,base64::engine::general_purpose::STANDARD.encode(bytes)))
+}
+
+fn hydrate_history_payload(path:&Path,payload:&mut Value,include_image:bool){
+    let filename=payload.get("_historyImageFile").and_then(Value::as_str).map(str::to_string);
+    if let Some(object)=payload.as_object_mut(){
+        object.remove("_historyImageFile");
+        if let Some(filename)=filename{
+            if include_image{
+                if let Some(data_url)=history_image_data_url(path,&filename){
+                    object.insert("imageDataUrl".into(),Value::String(data_url));
+                }
+            }else{
+                object.insert("hasImage".into(),Value::Bool(true));
+            }
+        }else if let Some(data_url)=object.get("imageDataUrl").and_then(Value::as_str){
+            if !include_image{
+                let has_image=!data_url.is_empty();
+                object.remove("imageDataUrl");
+                object.insert("hasImage".into(),Value::Bool(has_image));
+            }
+        }else if include_image{
+            object.remove("hasImage");
+        }else{
+            object.insert("hasImage".into(),Value::Bool(false));
+        }
+        if include_image{object.remove("hasImage");}
+    }
+}
+
+fn load_history_file(path:&Path)->Result<Vec<HistoryRecord>,String>{
+    let _guard=HISTORY_FILE_LOCK.lock()
+        .map_err(|_|"Generation history lock is poisoned.".to_string())?;
+    let mut all=read_history_records_file(path)?;
+    migrate_history_images(path,&mut all)?;
+    for record in &mut all{hydrate_history_payload(path,&mut record.payload,true);}
+    Ok(all)
+}
+
+fn load_history_index_file(path:&Path)->Result<Vec<HistoryRecord>,String>{
+    let _guard=HISTORY_FILE_LOCK.lock()
+        .map_err(|_|"Generation history lock is poisoned.".to_string())?;
+    let mut all=read_history_records_file(path)?;
+    migrate_history_images(path,&mut all)?;
+    for record in &mut all{hydrate_history_payload(path,&mut record.payload,false);}
+    Ok(all)
+}
+
+fn load_history_item_file(path:&Path,id:&str)->Result<Value,String>{
+    let _guard=HISTORY_FILE_LOCK.lock()
+        .map_err(|_|"Generation history lock is poisoned.".to_string())?;
+    let mut all=read_history_records_file(path)?;
+    migrate_history_images(path,&mut all)?;
+    let Some(record)=all.iter_mut().find(|record|
+        record.payload.get("id").and_then(Value::as_str)==Some(id)||record.id==id
+    ) else{return Err("Generation history item was not found.".into())};
+    hydrate_history_payload(path,&mut record.payload,true);
+    Ok(record.payload.clone())
+}
+
+fn load_history_image_file(path:&Path,id:&str)->Result<Option<String>,String>{
+    let _guard=HISTORY_FILE_LOCK.lock()
+        .map_err(|_|"Generation history lock is poisoned.".to_string())?;
+    let mut all=read_history_records_file(path)?;
+    migrate_history_images(path,&mut all)?;
+    let Some(record)=all.iter().find(|record|
+        record.payload.get("id").and_then(Value::as_str)==Some(id)||record.id==id
+    ) else{return Ok(None)};
+    if let Some(data_url)=record.payload.get("imageDataUrl").and_then(Value::as_str){
+        return Ok(Some(data_url.to_string()));
+    }
+    Ok(record.payload.get("_historyImageFile").and_then(Value::as_str)
+        .and_then(|filename|history_image_data_url(path,filename)))
+}
+
+fn append_history_file(path:&Path,payload:Value)->Result<HistoryRecord,String>{
+    let _guard=HISTORY_FILE_LOCK.lock()
+        .map_err(|_|"Generation history lock is poisoned.".to_string())?;
+    let mut all=read_history_records_file(path)
+        .map_err(|e|format!("Could not read existing generation history JSON; refusing to overwrite it: {e}"))?;
+    migrate_history_images(path,&mut all)?;
+    let mut stored_payload=payload;
+    if let Some(data_url)=stored_payload.get("imageDataUrl").and_then(Value::as_str).map(str::to_string){
+        if let Some(filename)=store_history_image(path,&data_url)?{
+            if let Some(object)=stored_payload.as_object_mut(){
+                object.remove("imageDataUrl");
+                object.insert("_historyImageFile".into(),Value::String(filename));
+            }
+        }
+    }
+    let rec=HistoryRecord{id:now_id(),timestamp:now_id(),payload:stored_payload};
+    all.insert(0,rec.clone());
+    if all.len()>100{all.truncate(100);}
+    write_history_records_file(path,&all)?;
+
+    // Keep disk usage bounded when the oldest history records are discarded.
+    let retained:std::collections::HashSet<String>=all.iter()
+        .filter_map(|record|record.payload.get("_historyImageFile").and_then(Value::as_str).map(str::to_string))
+        .collect();
+    let directory=history_images_dir(path);
+    if let Ok(entries)=fs::read_dir(&directory){
+        for entry in entries.flatten(){
+            if let Some(name)=entry.file_name().to_str().map(str::to_string){
+                if !retained.contains(&name){let _=fs::remove_file(entry.path());}
+            }
+        }
     }
     Ok(rec)
 }
@@ -1899,6 +2063,30 @@ async fn load_history(app:AppHandle)->Result<Vec<HistoryRecord>,String>{
     tokio::task::spawn_blocking(move || load_history_file(&path))
         .await
         .map_err(|e|format!("History read worker failed: {e}"))?
+}
+
+#[tauri::command]
+async fn load_history_index(app:AppHandle)->Result<Vec<HistoryRecord>,String>{
+    let path=history_path(&app)?;
+    tokio::task::spawn_blocking(move || load_history_index_file(&path))
+        .await
+        .map_err(|e|format!("History index read worker failed: {e}"))?
+}
+
+#[tauri::command]
+async fn load_history_item(app:AppHandle,id:String)->Result<Value,String>{
+    let path=history_path(&app)?;
+    tokio::task::spawn_blocking(move || load_history_item_file(&path,&id))
+        .await
+        .map_err(|e|format!("History item read worker failed: {e}"))?
+}
+
+#[tauri::command]
+async fn load_history_image(app:AppHandle,id:String)->Result<Option<String>,String>{
+    let path=history_path(&app)?;
+    tokio::task::spawn_blocking(move || load_history_image_file(&path,&id))
+        .await
+        .map_err(|e|format!("History image read worker failed: {e}"))?
 }
 
 #[tauri::command]
@@ -2079,7 +2267,7 @@ pub fn run(){
         .invoke_handler(tauri::generate_handler![
             pick_folder,discover_raphael_config,discover_raphael_roots,scan_library,list_provider_models,
             prepare_generation,stream_llm,parse_prompt_pair,finalize_prompt_pair,build_workflow,inject_prompts,
-            submit_to_comfy,monitor_comfy_generation,start_generation,stop_generation,history_revision,load_history,append_history,path_to_data_url,start_web_host,get_web_host_shared_settings,update_web_host_llm,update_web_host_generation_settings,stop_web_host
+            submit_to_comfy,monitor_comfy_generation,start_generation,stop_generation,history_revision,load_history,load_history_index,load_history_item,load_history_image,append_history,path_to_data_url,start_web_host,get_web_host_shared_settings,update_web_host_llm,update_web_host_generation_settings,stop_web_host
         ])
         .run(tauri::generate_context!())
         .expect("error while running Raphael Prompt Forge");
@@ -2395,6 +2583,37 @@ mod tests {
         );
         assert!(!finalized.positive_prompt.contains("char_tag"));
         assert_eq!(finalized.negative_prompt, "blurry");
+    }
+
+    #[test]
+    fn history_index_keeps_images_out_of_metadata_and_loads_them_on_demand() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("generation-history.json");
+        let image = "data:image/png;base64,AQID";
+        append_history_file(
+            &path,
+            json!({"id":"generation-lazy-image-test","imageDataUrl":image,"checkpoint":{"name":"test"}}),
+        ).expect("history append should succeed");
+
+        let stored = std::fs::read_to_string(&path).expect("read compact history");
+        assert!(
+            !stored.contains(image),
+            "image bytes must not remain embedded in the history metadata file"
+        );
+
+        let index = load_history_index_file(&path).expect("load history index");
+        assert_eq!(index.len(), 1);
+        assert_eq!(index[0].payload["hasImage"], true);
+        assert!(index[0].payload.get("imageDataUrl").is_none());
+
+        assert_eq!(
+            load_history_image_file(&path, "generation-lazy-image-test")
+                .expect("load history image"),
+            Some(image.to_string())
+        );
+        let item = load_history_item_file(&path, "generation-lazy-image-test")
+            .expect("load full history item");
+        assert_eq!(item["imageDataUrl"], image);
     }
 
     #[test]

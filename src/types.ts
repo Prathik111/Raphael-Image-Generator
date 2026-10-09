@@ -92,6 +92,8 @@ export interface GenerationRecord {
   rationale?: string;
   generationSettings?: GenerationSettings;
   imageDataUrl?: string;
+  /** Set by the lightweight history index when the image is stored separately. */
+  hasImage?: boolean;
   imageFilename?: string;
   workflow: unknown;
   comfyPromptId?: string;

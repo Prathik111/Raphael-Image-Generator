@@ -429,10 +429,172 @@ async function apiInvoke<T>(command:string, args:Record<string, unknown> = {}):P
   return value as T;
 }
 
+const randomLoraUsageStorageKey='raphael-image-generator.random-lora-usage.v1';
+interface RandomLoraUsage {
+  generation:number;
+  lastSelected:Record<string,number>;
+}
+function loadRandomLoraUsage():RandomLoraUsage{
+  try{
+    const parsed=JSON.parse(window.localStorage.getItem(randomLoraUsageStorageKey) || 'null') as Partial<RandomLoraUsage>|null;
+    if(parsed && Number.isFinite(parsed.generation) && parsed.lastSelected && typeof parsed.lastSelected==='object'){
+      return {generation:Math.max(0,Math.floor(parsed.generation as number)),lastSelected:parsed.lastSelected};
+    }
+  }catch{}
+  return {generation:0,lastSelected:{}};
+}
+function weightedLoraSample<T extends {id:string}>(pool:T[],count:number,usage:RandomLoraUsage):T[]{
+  const remaining=[...pool];
+  const selected:T[]=[];
+  const recoveryRolls=12;
+  while(selected.length<Math.max(0,count) && remaining.length){
+    const weights=remaining.map(item=>{
+      const last=usage.lastSelected[item.id];
+      if(!Number.isFinite(last)) return 1;
+      const age=Math.max(0,usage.generation-(last as number));
+      const recovery=Math.min(1,age/recoveryRolls);
+      // Newly used LoRAs retain a tiny chance, then recover gradually over ~12 stack rolls.
+      return 0.015+0.985*Math.pow(recovery,2.3);
+    });
+    const total=weights.reduce((sum,weight)=>sum+weight,0);
+    let roll=Math.random()*total;
+    let index=weights.length-1;
+    for(let i=0;i<weights.length;i++){
+      roll-=weights[i];
+      if(roll<0){index=i;break;}
+    }
+    selected.push(remaining.splice(index,1)[0]);
+  }
+  return selected;
+}
+function recordRandomLoraSelection(ids:string[]):void{
+  if(!ids.length) return;
+  try{
+    const usage=loadRandomLoraUsage();
+    const generation=usage.generation+1;
+    const lastSelected={...usage.lastSelected};
+    for(const id of ids) lastSelected[id]=generation;
+    // Prune stale entries so removed Registry models do not accumulate forever.
+    const keys=Object.keys(lastSelected);
+    if(keys.length>1500){
+      for(const key of keys.sort((a,b)=>lastSelected[a]-lastSelected[b]).slice(0,keys.length-1000)){
+        delete lastSelected[key];
+      }
+    }
+    window.localStorage.setItem(randomLoraUsageStorageKey,JSON.stringify({generation,lastSelected}));
+  }catch{}
+}
+
+let activeThumbnailRequests=0;
+const thumbnailRequestQueue:Array<()=>void>=[];
+async function withThumbnailConcurrency<T>(task:()=>Promise<T>):Promise<T>{
+  if(activeThumbnailRequests>=6){
+    await new Promise<void>(resolve=>thumbnailRequestQueue.push(resolve));
+  }
+  activeThumbnailRequests++;
+  try{return await task();}
+  finally{
+    activeThumbnailRequests--;
+    thumbnailRequestQueue.shift()?.();
+  }
+}
+
+const historyImageCache=new Map<string,string>();
+const historyImagePending=new Map<string,Promise<string|null>>();
+async function fetchHistoryImageCached(id:string):Promise<string|null>{
+  const cached=historyImageCache.get(id);
+  if(cached) return cached;
+  const pending=historyImagePending.get(id);
+  if(pending) return pending;
+  const request=apiInvoke<string|null>('load_history_image',{id})
+    .then(url=>{
+      if(typeof url==='string' && url.startsWith('data:image/')){
+        historyImageCache.set(id,url);
+        return url;
+      }
+      return null;
+    })
+    .finally(()=>historyImagePending.delete(id));
+  historyImagePending.set(id,request);
+  return request;
+}
+
 type ThumbnailState = 'loading' | 'ready' | 'error';
 
 const thumbnailCache = new Map<string,string>();
 const thumbnailPending = new Map<string,Promise<string>>();
+const thumbnailDbName='raphael-image-generator-thumbnails';
+const thumbnailStoreName='thumbnails';
+let thumbnailDbPromise:Promise<IDBDatabase|null>|null=null;
+
+function openThumbnailDb():Promise<IDBDatabase|null>{
+  if(typeof indexedDB==='undefined') return Promise.resolve(null);
+  if(thumbnailDbPromise) return thumbnailDbPromise;
+  thumbnailDbPromise=new Promise(resolve=>{
+    try{
+      const request=indexedDB.open(thumbnailDbName,1);
+      request.onupgradeneeded=()=>{
+        const db=request.result;
+        if(!db.objectStoreNames.contains(thumbnailStoreName)){
+          db.createObjectStore(thumbnailStoreName,{keyPath:'key'});
+        }
+      };
+      request.onsuccess=()=>resolve(request.result);
+      request.onerror=()=>resolve(null);
+      request.onblocked=()=>resolve(null);
+    }catch{
+      resolve(null);
+    }
+  });
+  return thumbnailDbPromise;
+}
+
+async function readPersistedThumbnail(key:string):Promise<string|null>{
+  const db=await openThumbnailDb();
+  if(!db) return null;
+  return new Promise(resolve=>{
+    try{
+      const request=db.transaction(thumbnailStoreName,'readonly').objectStore(thumbnailStoreName).get(key);
+      request.onsuccess=()=>{
+        const value=request.result as {dataUrl?:unknown}|undefined;
+        resolve(typeof value?.dataUrl==='string' && value.dataUrl.startsWith('data:image/') ? value.dataUrl : null);
+      };
+      request.onerror=()=>resolve(null);
+    }catch{
+      resolve(null);
+    }
+  });
+}
+
+async function persistThumbnail(key:string,dataUrl:string):Promise<void>{
+  // Avoid filling browser storage with unusually large preview assets.
+  if(dataUrl.length>1_000_000) return;
+  const db=await openThumbnailDb();
+  if(!db) return;
+  await new Promise<void>(resolve=>{
+    try{
+      const transaction=db.transaction(thumbnailStoreName,'readwrite');
+      transaction.objectStore(thumbnailStoreName).put({key,dataUrl,savedAt:Date.now()});
+      transaction.oncomplete=()=>resolve();
+      transaction.onerror=()=>resolve();
+      transaction.onabort=()=>resolve();
+    }catch{
+      resolve();
+    }
+  });
+  // Keep a bounded cache; IndexedDB persists across reloads, but should not grow forever.
+  try{
+    const transaction=db.transaction(thumbnailStoreName,'readwrite');
+    const store=transaction.objectStore(thumbnailStoreName);
+    const request=store.getAll();
+    request.onsuccess=()=>{
+      const rows=(request.result as Array<{key:string;savedAt?:number}>) || [];
+      if(rows.length<=300) return;
+      rows.sort((a,b)=>(a.savedAt || 0)-(b.savedAt || 0));
+      for(const row of rows.slice(0,rows.length-250)) store.delete(row.key);
+    };
+  }catch{}
+}
 
 function thumbnailReferences(reference?:string):string[]{
   if(!reference) return [];
@@ -451,29 +613,36 @@ async function fetchModelThumbnailReference(reference:string):Promise<string>{
   if(pending) return pending;
 
   const request = (async()=>{
-    let lastError:unknown;
-    for(let attempt=0; attempt<3; attempt++){
-      try{
-        const url=await apiInvoke<string>('path_to_data_url',{path:reference});
-        if(!url || !url.startsWith('data:image/')){
-          throw new Error('Registry returned an invalid thumbnail response.');
-        }
-        thumbnailCache.set(reference,url);
-        return url;
-      }catch(error){
-        lastError=error;
-        if(attempt<2){
-          await new Promise(resolve=>setTimeout(resolve,250 * (2 ** attempt)));
+    const persisted=await readPersistedThumbnail(reference);
+    if(persisted){
+      thumbnailCache.set(reference,persisted);
+      return persisted;
+    }
+    return withThumbnailConcurrency(async()=>{
+      let lastError:unknown;
+      for(let attempt=0; attempt<3; attempt++){
+        try{
+          const url=await apiInvoke<string>('path_to_data_url',{path:reference});
+          if(!url || !url.startsWith('data:image/')){
+            throw new Error('Registry returned an invalid thumbnail response.');
+          }
+          thumbnailCache.set(reference,url);
+          void persistThumbnail(reference,url);
+          return url;
+        }catch(error){
+          lastError=error;
+          if(attempt<2){
+            await new Promise(resolve=>setTimeout(resolve,250 * (2 ** attempt)));
+          }
         }
       }
-    }
-    throw lastError instanceof Error ? lastError : new Error(String(lastError || 'Thumbnail request failed.'));
+      throw lastError instanceof Error ? lastError : new Error(String(lastError || 'Thumbnail request failed.'));
+    });
   })().finally(()=>thumbnailPending.delete(reference));
 
   thumbnailPending.set(reference,request);
   return request;
 }
-
 async function fetchModelThumbnail(references:string[]):Promise<string>{
   let lastError:unknown;
   for(const reference of references){
@@ -535,7 +704,7 @@ function ModelThumbnail({model,iconSize=18}:{model:LibrarySnapshot['checkpoints'
         if(!entries[0]?.isIntersecting) return;
         observer?.disconnect();
         load();
-      },{rootMargin:'160px'});
+      },{rootMargin:'360px'});
       observer.observe(frameRef.current);
     }
 
@@ -568,6 +737,56 @@ function ModelThumbnail({model,iconSize=18}:{model:LibrarySnapshot['checkpoints'
       : <Layers3 size={iconSize} aria-hidden="true"/>}
   </span>;
 }
+
+function HistoryImageThumbnail({
+  item,
+  frameClassName='',
+  imageClassName='',
+  alt='',
+  eager=false,
+}:{
+  item:GenerationRecord;
+  frameClassName?:string;
+  imageClassName?:string;
+  alt?:string;
+  eager?:boolean;
+}){
+  const frameRef=useRef<HTMLSpanElement|null>(null);
+  const [src,setSrc]=useState<string|null>(item.imageDataUrl || historyImageCache.get(item.id) || null);
+  useEffect(()=>{
+    if(item.imageDataUrl){setSrc(item.imageDataUrl);return;}
+    const cached=historyImageCache.get(item.id);
+    if(cached){setSrc(cached);return;}
+    if(!item.hasImage){setSrc(null);return;}
+    let active=true;
+    let observer:IntersectionObserver|undefined;
+    let requested=false;
+    const load=()=>{
+      if(requested) return;
+      requested=true;
+      void fetchHistoryImageCached(item.id).then(url=>{
+        if(active) setSrc(url);
+      }).catch(()=>{if(active)setSrc(null);});
+    };
+    if(eager || typeof IntersectionObserver==='undefined' || !frameRef.current){
+      load();
+    }else{
+      observer=new IntersectionObserver(entries=>{
+        if(!entries.some(entry=>entry.isIntersecting)) return;
+        observer?.disconnect();
+        load();
+      },{rootMargin:'180px'});
+      observer.observe(frameRef.current);
+    }
+    return ()=>{active=false;observer?.disconnect();};
+  },[item.id,item.hasImage,item.imageDataUrl,eager]);
+  return <span ref={frameRef} className={frameClassName || 'history-image-thumbnail'}>
+    {src
+      ? <img className={imageClassName || undefined} src={src} alt={alt} loading={eager ? 'eager' : 'lazy'} decoding="async"/>
+      : <WandSparkles size={16}/>}
+  </span>;
+}
+
 function extractJsonObject(raw:string):Record<string,unknown>{
   let clean=raw.trim();
   if(clean.includes('</think>')) clean=clean.slice(clean.lastIndexOf('</think>')+8).trim();
@@ -995,6 +1214,7 @@ function App(){
   // the whole archive (which can contain hundreds of MiB of base64 image data).
   const historyRevisionRef=useRef('');
   const historyLoadInFlight=useRef(false);
+  const latestShowcaseImageRequest=useRef('');
 
   const selected=useMemo(
     ()=>library?.checkpoints.find(x=>x.id===selectedId) || library?.checkpoints[0],
@@ -1135,10 +1355,31 @@ function App(){
       const revision=await apiInvoke<string>('history_revision');
       if(revision===historyRevisionRef.current) return;
 
-      const records=await apiInvoke<Array<{payload:GenerationRecord}>>('load_history');
-      if(!Array.isArray(records)) throw new Error('History response was not a list.');
-      setHistory(records.map(x=>x.payload).filter(Boolean));
+      const records=await apiInvoke<Array<{payload:GenerationRecord}>>('load_history_index');
+      if(!Array.isArray(records)) throw new Error('History index response was not a list.');
+      const items=records.map(x=>({
+        ...x.payload,
+        hasImage:Boolean(x.payload?.hasImage || x.payload?.imageDataUrl),
+        imageDataUrl:undefined,
+      })).filter(item=>Boolean(item.id));
+      setHistory(items);
       historyRevisionRef.current=revision;
+
+      // Fetch only the newest image for the showcase. The remaining history
+      // thumbnails are requested only when their cards approach the viewport.
+      const newestWithImage=items.find(item=>item.hasImage);
+      if(newestWithImage && latestShowcaseImageRequest.current!==newestWithImage.id){
+        latestShowcaseImageRequest.current=newestWithImage.id;
+        void fetchHistoryImageCached(newestWithImage.id).then(imageDataUrl=>{
+          if(imageDataUrl){
+            setHistory(current=>current.map(item=>item.id===newestWithImage.id
+              ? {...item,imageDataUrl}
+              : item));
+          }else{
+            latestShowcaseImageRequest.current='';
+          }
+        }).catch(()=>{latestShowcaseImageRequest.current='';});
+      }
     }catch(e){
       if(showError) setError('Could not load host generation history: '+String(e));
     }finally{
@@ -1444,6 +1685,7 @@ function App(){
     setError('');
 
     const manualIds=manualLoraIds.filter(id=>allLoras.some(lora=>lora.id===id));
+    const randomUsage=loadRandomLoraUsage();
     const manualCharacterCount=manualIds.reduce((count,id)=>{
       const lora=allLoras.find(item=>item.id===id);
       return count+(lora && isCharacterLoraForCheckpoint(lora,selected) ? 1 : 0);
@@ -1488,14 +1730,12 @@ function App(){
       const characterPool=compatibleLoras
         .filter(lora=>!manualIds.includes(lora.id))
         .filter(lora=>!failedRandomIds.has(lora.id))
-        .filter(lora=>isCharacterLoraForCheckpoint(lora,selected))
-        .sort(()=>Math.random()-0.5);
+        .filter(lora=>isCharacterLoraForCheckpoint(lora,selected));
 
       const availablePool=compatibleLoras
         .filter(lora=>!manualIds.includes(lora.id))
         .filter(lora=>!failedRandomIds.has(lora.id))
-        .filter(lora=>!isCharacterLoraForCheckpoint(lora,selected))
-        .sort(()=>Math.random()-0.5);
+        .filter(lora=>!isCharacterLoraForCheckpoint(lora,selected));
 
       const randomSlots=Math.max(
         0,
@@ -1518,10 +1758,10 @@ function App(){
         ? Math.floor(Math.random()*characterSlots)+1
         : 0;
 
-      randomIds.push(...characterPool.slice(0,randomCharacterCount).map(lora=>lora.id));
+      randomIds.push(...weightedLoraSample(characterPool,randomCharacterCount,randomUsage).map(lora=>lora.id));
 
       const remainingSlots=Math.max(0,randomSlots-randomIds.length);
-      randomIds.push(...availablePool.slice(0,remainingSlots).map(lora=>lora.id));
+      randomIds.push(...weightedLoraSample(availablePool,remainingSlots,randomUsage).map(lora=>lora.id));
 
       const combinedIds=[...manualIds,...randomIds];
 
@@ -1537,6 +1777,7 @@ function App(){
             registryUrl:registryUrl || null,
           },
         });
+        recordRandomLoraSelection(randomIds);
         setSelectedLoraIds(combinedIds);
         setPrepared(result);
         setStageStatus('compatibility','done');
@@ -2041,11 +2282,14 @@ function App(){
         rationale:pair.rationale,
         generationSettings:historySettings,
         imageDataUrl:generatedImageDataUrl || undefined,
+        hasImage:Boolean(generatedImageDataUrl),
         imageFilename:generatedImageFilename || undefined,
         workflow:injected,
         comfyPromptId:promptId,
       };
       await apiInvoke('append_history',{payload:record});
+      if(generatedImageDataUrl) historyImageCache.set(record.id,generatedImageDataUrl);
+      historyRevisionRef.current=await apiInvoke<string>('history_revision').catch(()=>historyRevisionRef.current);
       setHistory(x=>[record,...x].slice(0,100));
       setSelectedHistoryId(record.id);
       setStage('recorded');
@@ -2077,6 +2321,16 @@ function App(){
     setHistorySettingsVisible(false);
     setTab('history');
     setSettingsOpen(false);
+    const item=history.find(record=>record.id===id);
+    if(item?.hasImage && !item.imageDataUrl){
+      void fetchHistoryImageCached(id).then(imageDataUrl=>{
+        if(imageDataUrl){
+          setHistory(current=>current.map(record=>record.id===id
+            ? {...record,imageDataUrl}
+            : record));
+        }
+      }).catch(error=>setError('Could not load saved generation image: '+String(error)));
+    }
   }
 
   function selectCheckpoint(id:string){
@@ -2144,6 +2398,9 @@ function App(){
   }
 
   const selectedHistory=selectedHistoryId ? history.find(item=>item.id===selectedHistoryId) : undefined;
+  const latestShowcaseRecord=history.find(item=>item.imageDataUrl || (item.hasImage && historyImageCache.has(item.id)));
+  const latestShowcaseImage=resultImage || latestShowcaseRecord?.imageDataUrl
+    || (latestShowcaseRecord ? historyImageCache.get(latestShowcaseRecord.id) : undefined);
 
   return <div className="app-shell">
     <iframe className="raphael-bg" src="/raphael-background.html" title="Raphael background" aria-hidden="true"/>
@@ -2189,25 +2446,25 @@ function App(){
 
       <div className="showcase-heading">
         <span>IMAGE SHOWCASE</span>
-        <span>{history.filter(item=>item.imageDataUrl).length}</span>
+        <span>{history.filter(item=>item.hasImage || item.imageDataUrl).length}</span>
       </div>
       <div className="image-showcase">
         <div className="showcase-main">
-          {(resultImage || history.find(item=>item.imageDataUrl)?.imageDataUrl)
-            ? <img src={resultImage || history.find(item=>item.imageDataUrl)?.imageDataUrl || ''} alt="Latest generated result"/>
+          {latestShowcaseImage
+            ? <img src={latestShowcaseImage} alt="Latest generated result" loading="lazy" decoding="async"/>
             : <div className="showcase-empty"><WandSparkles size={22}/><span>NO GENERATED IMAGE</span></div>}
         </div>
         <div className="showcase-meta">
-          <b>{resultFilename || history.find(item=>item.imageDataUrl)?.checkpoint.name || 'READY FOR GENERATION'}</b>
+          <b>{resultFilename || latestShowcaseRecord?.checkpoint.name || 'READY FOR GENERATION'}</b>
           <span>{comfyStatus==='done' ? 'LATEST GENERATION' : selected?.name || 'SELECT A CHECKPOINT'}</span>
         </div>
         <div className="showcase-strip">
-          {history.filter(item=>item.imageDataUrl).slice(0,6).map(item=>
+          {history.filter(item=>item.hasImage || item.imageDataUrl).slice(0,6).map(item=>
             <button className="showcase-thumb" key={item.id} onClick={()=>openHistory(item.id)} title={new Date(item.timestamp).toLocaleString()}>
-              <img src={item.imageDataUrl} alt=""/>
+              <HistoryImageThumbnail item={item}/>
             </button>
           )}
-          {!history.some(item=>item.imageDataUrl) && <div className="showcase-no-history">NO HISTORY</div>}
+          {!history.some(item=>item.hasImage || item.imageDataUrl) && <div className="showcase-no-history">NO HISTORY</div>}
         </div>
       </div>
 
@@ -2360,8 +2617,14 @@ function App(){
           </div>
 
           <div className="history-detail-image-wrap">
-            {selectedHistory.imageDataUrl
-              ? <img className="history-detail-image" src={selectedHistory.imageDataUrl} alt={selectedHistory.imageFilename || 'Generated image'}/>
+            {(selectedHistory.hasImage || selectedHistory.imageDataUrl)
+              ? <HistoryImageThumbnail
+                  item={selectedHistory}
+                  frameClassName="history-detail-image-frame"
+                  imageClassName="history-detail-image"
+                  alt={selectedHistory.imageFilename || 'Generated image'}
+                  eager
+                />
               : <div className="history-detail-no-image"><WandSparkles size={24}/><span>IMAGE NOT STORED</span></div>}
             {selectedHistory.imageFilename && <div className="result-filename">{selectedHistory.imageFilename}</div>}
           </div>
@@ -2428,7 +2691,9 @@ function App(){
 
         {!selectedHistoryId && history.length>0 && <div className="history-list">
           {history.map(item=><button className="history-list-item" key={item.id} onClick={()=>openHistory(item.id)}>
-            <div className="history-list-thumb">{item.imageDataUrl ? <img src={item.imageDataUrl} alt=""/> : <WandSparkles size={18}/>}</div>
+            <div className="history-list-thumb">{item.hasImage || item.imageDataUrl
+              ? <HistoryImageThumbnail item={item}/>
+              : <WandSparkles size={18}/>}</div>
             <div>
               <b>{new Date(item.timestamp).toLocaleString()}</b>
               <span>{item.checkpoint.name}</span>

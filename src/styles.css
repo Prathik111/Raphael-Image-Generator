@@ -242,6 +242,8 @@ button,input,textarea,select{font-size:12px}
 .history-detail-meta{font-size:10px;color:var(--muted)}
 .history-detail-image-wrap{border:1px solid rgba(255,255,255,.16);background:rgba(0,0,0,.36);padding:8px;text-align:center}
 .history-detail-image{display:block;width:100%;max-height:72vh;object-fit:contain;background:#000}
+.history-detail-image-frame{display:block;width:100%;height:auto;min-height:80px}
+.history-detail-image-frame .history-detail-image{height:auto;max-height:72vh;object-fit:contain}
 .history-detail-no-image{min-height:320px;display:grid;place-items:center;gap:8px;color:var(--dim);font-size:10px;letter-spacing:.12em}
 .history-settings-toggle{margin-top:10px}
 .history-settings-card{margin-top:10px;border:1px solid var(--line2);background:rgba(0,0,0,.30);padding:12px}
@@ -268,6 +270,8 @@ button,input,textarea,select{font-size:12px}
 .history-list-item:hover{border-color:rgba(255,255,255,.45);background:rgba(255,255,255,.05)}
 .history-list-thumb{width:58px;height:58px;border:1px solid var(--line2);display:grid;place-items:center;overflow:hidden}
 .history-list-thumb img{width:100%;height:100%;object-fit:cover}
+.history-image-thumbnail{width:100%;height:100%;display:grid;place-items:center;overflow:hidden}
+.history-image-thumbnail img{width:100%;height:100%;display:block;object-fit:cover}
 .history-list-item b{display:block;font-size:10px}
 .history-list-item span{display:block;margin-top:3px;font-size:10px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .history-list-item small{display:block;margin-top:3px;font-size:9px;color:var(--dim)}
