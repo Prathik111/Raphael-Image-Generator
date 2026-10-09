@@ -558,6 +558,7 @@ const thumbnailStoreName='thumbnails';
 const librarySnapshotStoreName='librarySnapshots';
 const librarySnapshotCacheKey='latest';
 let thumbnailDbPromise:Promise<IDBDatabase|null>|null=null;
+let thumbnailWritesSincePrune=0;
 
 function openThumbnailDb():Promise<IDBDatabase|null>{
   if(typeof indexedDB==='undefined') return Promise.resolve(null);
@@ -667,7 +668,10 @@ async function persistThumbnail(key:string,dataUrl:string):Promise<void>{
       resolve();
     }
   });
-  // Keep a bounded cache; IndexedDB persists across reloads, but should not grow forever.
+  // Pruning reads the whole object store, so perform it periodically rather
+  // than adding a getAll()/sort pass to every visible thumbnail request.
+  thumbnailWritesSincePrune++;
+  if(thumbnailWritesSincePrune%24!==0) return;
   try{
     const transaction=db.transaction(thumbnailStoreName,'readwrite');
     const store=transaction.objectStore(thumbnailStoreName);
