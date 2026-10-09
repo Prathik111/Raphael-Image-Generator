@@ -1853,6 +1853,14 @@ async fn web_monitor_comfy(
 }
 
 fn now_id()->String{
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .to_string()
+}
+
+fn unique_history_id()->String{
     static NEXT_ID:AtomicU64=AtomicU64::new(0);
     let timestamp=SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1932,7 +1940,7 @@ fn store_history_image(path:&Path,data_url:&str,create_thumbnail:bool)->Result<O
     let Ok(bytes)=base64::engine::general_purpose::STANDARD.decode(encoded) else{return Ok(None)};
     let directory=history_images_dir(path);
     fs::create_dir_all(&directory).map_err(|e|format!("Could not create history image directory: {e}"))?;
-    let filename=format!("{}.{}",now_id(),extension);
+    let filename=format!("{}.{}",unique_history_id(),extension);
     fs::write(directory.join(&filename),&bytes).map_err(|e|format!("Could not save generated history image: {e}"))?;
     if create_thumbnail{
         // Keep original image bytes for detail/export; small JPEG previews are
@@ -1944,7 +1952,7 @@ fn store_history_image(path:&Path,data_url:&str,create_thumbnail:bool)->Result<O
 
 fn write_history_records_file(path:&Path,records:&[HistoryRecord])->Result<(),String>{
     let serialized=serde_json::to_vec(records).map_err(|e|e.to_string())?;
-    let temp=path.with_file_name(format!("generation-history-{}.tmp",now_id()));
+    let temp=path.with_file_name(format!("generation-history-{}.tmp",unique_history_id()));
     fs::write(&temp,serialized).map_err(|e|format!("Could not write temporary generation history: {e}"))?;
     if let Err(error)=fs::rename(&temp,path){
         let _=fs::remove_file(&temp);
@@ -2120,7 +2128,7 @@ fn append_history_file(path:&Path,payload:Value)->Result<HistoryRecord,String>{
             }
         }
     }
-    let rec=HistoryRecord{id:now_id(),timestamp:now_id(),payload:stored_payload};
+    let rec=HistoryRecord{id:unique_history_id(),timestamp:now_id(),payload:stored_payload};
     all.insert(0,rec.clone());
     if all.len()>100{all.truncate(100);}
     write_history_records_file(path,&all)?;
