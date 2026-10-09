@@ -2716,8 +2716,10 @@ function App(){
           <button className="ghost-btn" onClick={()=>{setTab('generate');showHistoryList()}}><WandSparkles size={13}/> GENERATE</button>
           <button className="ghost-btn" onClick={()=>void loadHistory(true)}><RefreshCw size={13}/> REFRESH HISTORY</button>
         </div>
-        {selectedHistoryId && (selectedHistoryLoading || !selectedHistory) ? (
+        {selectedHistoryId && selectedHistoryLoading ? (
           <div className="empty-state"><RefreshCw size={22}/><div><b>LOADING GENERATION</b><span>Reading this record's prompts and settings. Its image loads separately.</span></div></div>
+        ) : selectedHistoryId && !selectedHistory ? (
+          <div className="empty-state"><CircleAlert size={22}/><div><b>GENERATION UNAVAILABLE</b><span>Could not load this record. Refresh history and try again.</span></div></div>
         ) : !selectedHistory ? (
           <div className="empty-state"><History size={22}/><div><b>NO GENERATIONS</b><span>Completed generations will appear here.</span></div></div>
         ) : <>
