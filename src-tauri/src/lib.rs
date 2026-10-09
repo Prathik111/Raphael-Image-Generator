@@ -2095,7 +2095,7 @@ fn load_history_index_file(path:&Path)->Result<Vec<HistoryRecord>,String>{
 fn load_history_item_file(path:&Path,id:&str)->Result<Value,String>{
     let _guard=HISTORY_FILE_LOCK.lock()
         .map_err(|_|"Generation history lock is poisoned.".to_string())?;
-    let all=read_history_records_file(path)?;
+    let mut all=read_history_records_file(path)?;
     let Some(record)=all.iter_mut().find(|record|
         record.payload.get("id").and_then(Value::as_str)==Some(id)||record.id==id
     ) else{return Err("Generation history item was not found.".into())};
