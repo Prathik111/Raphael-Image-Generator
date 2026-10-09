@@ -2504,7 +2504,14 @@ function App(){
         comfyPromptId:promptId,
       };
       await apiInvoke('append_history',{payload:record});
-      if(generatedImageDataUrl) rememberHistoryImage(record.id,generatedImageDataUrl);
+      if(generatedImageDataUrl){
+        rememberHistoryImage(record.id,generatedImageDataUrl);
+        // Once the host has persisted the generation and its compact preview,
+        // update the showcase without waiting for the periodic history poll.
+        void fetchHistoryThumbnailCached(record.id).then(preview=>{
+          if(preview) setHistoryShowcaseImage({id:record.id,src:preview});
+        }).catch(()=>{});
+      }
       historyRevisionRef.current=await apiInvoke<string>('history_revision').catch(()=>historyRevisionRef.current);
       const historySummary:GenerationRecord={
         ...record,
