@@ -636,6 +636,18 @@ async function readPersistedThumbnail(key:string):Promise<string|null>{
   });
 }
 
+async function deletePersistedThumbnail(key:string):Promise<void>{
+  const db=await openThumbnailDb();
+  if(!db) return;
+  await new Promise<void>(resolve=>{
+    try{
+      const request=db.transaction(thumbnailStoreName,'readwrite').objectStore(thumbnailStoreName).delete(key);
+      request.onsuccess=()=>resolve();
+      request.onerror=()=>resolve();
+    }catch{resolve();}
+  });
+}
+
 async function persistThumbnail(key:string,dataUrl:string):Promise<void>{
   // Avoid filling browser storage with unusually large preview assets.
   if(dataUrl.length>1_000_000) return;
@@ -791,7 +803,10 @@ function ModelThumbnail({model,iconSize=18}:{model:LibrarySnapshot['checkpoints'
 
   const handleImageError=()=>{
     const failedReference=references.find(reference=>thumbnailCache.get(reference)===src);
-    if(failedReference) thumbnailCache.delete(failedReference);
+    if(failedReference){
+      thumbnailCache.delete(failedReference);
+      void deletePersistedThumbnail(failedReference);
+    }
     setState('loading');
     void fetchModelThumbnail(references)
       .then(url=>{
@@ -1473,7 +1488,10 @@ function App(){
       // Fetch only the newest image for the showcase. The remaining history
       // thumbnails are requested only when their cards approach the viewport.
       const newestWithImage=items.find(item=>item.hasImage);
-      if(newestWithImage && latestShowcaseImageRequest.current!==newestWithImage.id){
+      if(newestWithImage && (
+        latestShowcaseImageRequest.current!==newestWithImage.id
+        || !historyImageCache.has(newestWithImage.id)
+      )){
         latestShowcaseImageRequest.current=newestWithImage.id;
         void fetchHistoryImageCached(newestWithImage.id).then(imageDataUrl=>{
           if(!imageDataUrl) latestShowcaseImageRequest.current='';
