@@ -1424,46 +1424,58 @@ function App(){
       if(config.models_root) setComfyRoot(config.models_root);
       if(config.registry_url) setRegistryUrl(config.registry_url);
 
+      // Start the Registry scan immediately. Loading the host's LLM settings
+      // or waiting for its provider model endpoint must not block model lists.
+      const scanPromise=scan(config.models_root || comfyRoot,config.registry_url || undefined);
+
       if(!isTauriRuntime){
-        const hostConfig=await apiInvoke<{
-          provider:ProviderKind;
-          baseUrl:string;
-          model:string;
-          temperature?:number;
-          maxTokens?:number;
-          contextTokens?:number;
-          generationSettings?:Partial<StoredGenerationSettings>;
-        }>('get_host_llm_config');
-        const hostGeneration=hostConfig.generationSettings || {};
-        const nextLlm={
-          ...llm,
-          provider:hostConfig.provider,
-          baseUrl:hostConfig.baseUrl,
-          model:hostConfig.model || '',
-          temperature:hostConfig.temperature ?? llm.temperature,
-          maxTokens:hostConfig.maxTokens ?? llm.maxTokens,
-          contextTokens:hostConfig.contextTokens ?? llm.contextTokens,
-        };
-        setLlm(nextLlm);
-        setGenerationDraft(d=>({
-          ...d,
-          ...hostGeneration,
-          llm:{
-            ...d.llm,
-            ...(hostGeneration.llm || {}),
+        try{
+          const hostConfig=await apiInvoke<{
+            provider:ProviderKind;
+            baseUrl:string;
+            model:string;
+            temperature?:number;
+            maxTokens?:number;
+            contextTokens?:number;
+            generationSettings?:Partial<StoredGenerationSettings>;
+          }>('get_host_llm_config');
+          const hostGeneration=hostConfig.generationSettings || {};
+          const nextLlm={
+            ...llm,
             provider:hostConfig.provider,
             baseUrl:hostConfig.baseUrl,
             model:hostConfig.model || '',
-            temperature:hostConfig.temperature ?? d.llm.temperature,
-            maxTokens:hostConfig.maxTokens ?? d.llm.maxTokens,
-            contextTokens:hostConfig.contextTokens ?? d.llm.contextTokens,
-          },
-        }));
-        await fetchModels(nextLlm);
-        setLanClientReady(true);
+            temperature:hostConfig.temperature ?? llm.temperature,
+            maxTokens:hostConfig.maxTokens ?? llm.maxTokens,
+            contextTokens:hostConfig.contextTokens ?? llm.contextTokens,
+          };
+          setLlm(nextLlm);
+          setGenerationDraft(d=>({
+            ...d,
+            ...hostGeneration,
+            llm:{
+              ...d.llm,
+              ...(hostGeneration.llm || {}),
+              provider:hostConfig.provider,
+              baseUrl:hostConfig.baseUrl,
+              model:hostConfig.model || '',
+              temperature:hostConfig.temperature ?? d.llm.temperature,
+              maxTokens:hostConfig.maxTokens ?? d.llm.maxTokens,
+              contextTokens:hostConfig.contextTokens ?? d.llm.contextTokens,
+            },
+          }));
+          setLanClientReady(true);
+          // Provider discovery is useful but not required to populate history,
+          // checkpoints, or LoRAs. Let it finish in the background.
+          void fetchModels(nextLlm).catch(error=>
+            setWebHostError('Could not load shared provider models: '+String(error))
+          );
+        }catch(error){
+          setWebHostError('Could not load shared host settings: '+String(error));
+        }
       }
 
-      await scan(config.models_root || comfyRoot,config.registry_url || undefined);
+      await scanPromise;
     }catch(e){
       setError(String(e));
     }
