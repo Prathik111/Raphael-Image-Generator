@@ -15,7 +15,7 @@ use futures_util::StreamExt;
 use rand::{prelude::IndexedRandom, seq::SliceRandom, Rng};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{fs, path::{Path, PathBuf}, process::Command, sync::{Arc, atomic::{AtomicBool, Ordering}}, time::{Duration, Instant, SystemTime, UNIX_EPOCH}};
+use std::{fs, path::{Path, PathBuf}, process::Command, sync::{Arc, atomic::{AtomicBool, AtomicU64, Ordering}}, time::{Duration, Instant, SystemTime, UNIX_EPOCH}};
 use tauri::{AppHandle, Manager};
 use tauri::ipc::Channel;
 use tokio::sync::Mutex;
@@ -1848,7 +1848,14 @@ async fn web_monitor_comfy(
     Sse::new(UnboundedReceiverStream::new(rx)).keep_alive(KeepAlive::default())
 }
 
-fn now_id()->String{SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis().to_string()}
+fn now_id()->String{
+    static NEXT_ID:AtomicU64=AtomicU64::new(0);
+    let timestamp=SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("{}-{}",timestamp,NEXT_ID.fetch_add(1,Ordering::Relaxed))
+}
 static HISTORY_FILE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn history_path(app:&AppHandle)->Result<PathBuf,String>{
