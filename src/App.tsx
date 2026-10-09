@@ -1072,15 +1072,35 @@ function App(){
           provider:ProviderKind;
           baseUrl:string;
           model:string;
+          temperature?:number;
+          maxTokens?:number;
+          contextTokens?:number;
           generationSettings?:Partial<StoredGenerationSettings>;
         }>('get_host_llm_config');
         const hostGeneration=hostConfig.generationSettings || {};
-        const nextLlm={...llm,provider:hostConfig.provider,baseUrl:hostConfig.baseUrl,model:hostConfig.model || ''};
+        const nextLlm={
+          ...llm,
+          provider:hostConfig.provider,
+          baseUrl:hostConfig.baseUrl,
+          model:hostConfig.model || '',
+          temperature:hostConfig.temperature ?? llm.temperature,
+          maxTokens:hostConfig.maxTokens ?? llm.maxTokens,
+          contextTokens:hostConfig.contextTokens ?? llm.contextTokens,
+        };
         setLlm(nextLlm);
         setGenerationDraft(d=>({
           ...d,
           ...hostGeneration,
-          llm:{...d.llm,...(hostGeneration.llm || {}),provider:hostConfig.provider,baseUrl:hostConfig.baseUrl,model:hostConfig.model || ''},
+          llm:{
+            ...d.llm,
+            ...(hostGeneration.llm || {}),
+            provider:hostConfig.provider,
+            baseUrl:hostConfig.baseUrl,
+            model:hostConfig.model || '',
+            temperature:hostConfig.temperature ?? d.llm.temperature,
+            maxTokens:hostConfig.maxTokens ?? d.llm.maxTokens,
+            contextTokens:hostConfig.contextTokens ?? d.llm.contextTokens,
+          },
         }));
         await fetchModels(nextLlm);
         setLanClientReady(true);
@@ -1234,7 +1254,7 @@ function App(){
     // The desktop host publishes its settings while hosting; LAN clients also
     // write intentional settings changes back to that same host-side store.
     if(isTauriRuntime ? !webHost : !lanClientReady) return;
-    if(!isTauriRuntime) generationSettingsEditedAt.current=Date.now();
+    generationSettingsEditedAt.current=Date.now();
     const timeout=window.setTimeout(()=>{
       void apiInvoke('update_web_host_generation_settings',{generationSettings:generationDraft})
         .catch(e=>setWebHostError('Could not sync generation settings with the host: '+String(e)));
@@ -1243,14 +1263,52 @@ function App(){
   },[generationDraft,webHost,lanClientReady]);
 
   useEffect(()=>{
-    if(isTauriRuntime || !lanClientReady) return;
+    // Keep both the LAN client and the desktop host aligned with the host-side
+    // settings store. This also persists remote edits through the host's normal
+    // localStorage effect so they survive a desktop restart.
+    if(isTauriRuntime ? !webHost : !lanClientReady) return;
+    let active=true;
     const refresh=async()=>{
       try{
-        const hostGeneration=await apiInvoke<Partial<StoredGenerationSettings>>('get_host_generation_settings');
+        const hostConfig=await apiInvoke<{
+          provider:ProviderKind;
+          baseUrl:string;
+          model:string;
+          temperature?:number;
+          maxTokens?:number;
+          contextTokens?:number;
+          generationSettings?:Partial<StoredGenerationSettings>;
+        }>('get_host_llm_config');
+        if(!active || Date.now()-generationSettingsEditedAt.current<2000) return;
+        const hostGeneration=hostConfig.generationSettings || {};
+        const hostLlm={
+          provider:hostConfig.provider,
+          baseUrl:hostConfig.baseUrl,
+          model:hostConfig.model || '',
+          temperature:hostConfig.temperature,
+          maxTokens:hostConfig.maxTokens,
+          contextTokens:hostConfig.contextTokens,
+        };
+        setProvider(hostConfig.provider);
+        setLlm(current=>{
+          const next={
+            ...current,
+            provider:hostLlm.provider,
+            baseUrl:hostLlm.baseUrl,
+            model:hostLlm.model,
+            temperature:hostLlm.temperature ?? current.temperature,
+            maxTokens:hostLlm.maxTokens ?? current.maxTokens,
+            contextTokens:hostLlm.contextTokens ?? current.contextTokens,
+          };
+          return current.provider===next.provider
+            && current.baseUrl===next.baseUrl
+            && current.model===next.model
+            && current.temperature===next.temperature
+            && current.maxTokens===next.maxTokens
+            && current.contextTokens===next.contextTokens
+            ? current : next;
+        });
         setGenerationDraft(current=>{
-          // A poll that started before a local edit must not revert that edit
-          // before its debounced write reaches the host.
-          if(Date.now()-generationSettingsEditedAt.current<2000) return current;
           const currentSignature=JSON.stringify({
             plannerSystemPrompt:current.plannerSystemPrompt,
             tagSystemPrompt:current.tagSystemPrompt,
@@ -1303,19 +1361,42 @@ function App(){
             cfg:hostGeneration.cfg,
             sampler:hostGeneration.sampler,
           });
-          if(currentSignature===hostSignature) return current;
+          const currentLlm={
+            provider:current.llm.provider,
+            baseUrl:current.llm.baseUrl,
+            model:current.llm.model,
+            temperature:current.llm.temperature,
+            maxTokens:current.llm.maxTokens,
+            contextTokens:current.llm.contextTokens,
+          };
+          const targetLlm={
+            provider:hostLlm.provider,
+            baseUrl:hostLlm.baseUrl,
+            model:hostLlm.model,
+            temperature:hostLlm.temperature ?? current.llm.temperature,
+            maxTokens:hostLlm.maxTokens ?? current.llm.maxTokens,
+            contextTokens:hostLlm.contextTokens ?? current.llm.contextTokens,
+          };
+          const generationChanged=currentSignature!==hostSignature;
+          const llmChanged=JSON.stringify(currentLlm)!==JSON.stringify(targetLlm);
+          if(!generationChanged && !llmChanged) return current;
           return {
             ...current,
-            ...hostGeneration,
-            llm:current.llm,
+            ...(generationChanged ? hostGeneration : {}),
+            llm:llmChanged ? {...current.llm,...targetLlm} : current.llm,
           };
         });
-      }catch{}
+      }catch(e){
+        if(active) setWebHostError('Could not refresh shared host settings: '+String(e));
+      }
     };
     void refresh();
     const interval=window.setInterval(()=>void refresh(),2500);
-    return ()=>window.clearInterval(interval);
-  },[lanClientReady]);
+    return ()=>{
+      active=false;
+      window.clearInterval(interval);
+    };
+  },[webHost,lanClientReady]);
 
   useEffect(()=>{
     // LAN generations append to the host's persistent history file. Refresh the
