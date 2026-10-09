@@ -738,7 +738,19 @@ function ModelThumbnail({model,iconSize=18}:{model:LibrarySnapshot['checkpoints'
   </span>;
 }
 
-function HistoryImageThumbnail({item}:{item:GenerationRecord}){
+function HistoryImageThumbnail({
+  item,
+  frameClassName='',
+  imageClassName='',
+  alt='',
+  eager=false,
+}:{
+  item:GenerationRecord;
+  frameClassName?:string;
+  imageClassName?:string;
+  alt?:string;
+  eager?:boolean;
+}){
   const frameRef=useRef<HTMLSpanElement|null>(null);
   const [src,setSrc]=useState<string|null>(item.imageDataUrl || historyImageCache.get(item.id) || null);
   useEffect(()=>{
@@ -748,25 +760,30 @@ function HistoryImageThumbnail({item}:{item:GenerationRecord}){
     if(!item.hasImage){setSrc(null);return;}
     let active=true;
     let observer:IntersectionObserver|undefined;
+    let requested=false;
     const load=()=>{
+      if(requested) return;
+      requested=true;
       void fetchHistoryImageCached(item.id).then(url=>{
         if(active) setSrc(url);
       }).catch(()=>{if(active)setSrc(null);});
     };
-    if(typeof IntersectionObserver==='undefined' || !frameRef.current){
+    if(eager || typeof IntersectionObserver==='undefined' || !frameRef.current){
       load();
     }else{
       observer=new IntersectionObserver(entries=>{
-        if(!entries[0]?.isIntersecting) return;
+        if(!entries.some(entry=>entry.isIntersecting)) return;
         observer?.disconnect();
         load();
-      },{rootMargin:'140px'});
+      },{rootMargin:'180px'});
       observer.observe(frameRef.current);
     }
     return ()=>{active=false;observer?.disconnect();};
-  },[item.id,item.hasImage,item.imageDataUrl]);
-  return <span ref={frameRef} className="history-image-thumbnail">
-    {src ? <img src={src} alt="" loading="lazy" decoding="async"/> : <WandSparkles size={16}/>}
+  },[item.id,item.hasImage,item.imageDataUrl,eager]);
+  return <span ref={frameRef} className={frameClassName || 'history-image-thumbnail'}>
+    {src
+      ? <img className={imageClassName || undefined} src={src} alt={alt} loading={eager ? 'eager' : 'lazy'} decoding="async"/>
+      : <WandSparkles size={16}/>}
   </span>;
 }
 
@@ -2600,8 +2617,14 @@ function App(){
           </div>
 
           <div className="history-detail-image-wrap">
-            {selectedHistory.imageDataUrl
-              ? <img className="history-detail-image" src={selectedHistory.imageDataUrl} alt={selectedHistory.imageFilename || 'Generated image'}/>
+            {(selectedHistory.hasImage || selectedHistory.imageDataUrl)
+              ? <HistoryImageThumbnail
+                  item={selectedHistory}
+                  frameClassName="history-detail-image-frame"
+                  imageClassName="history-detail-image"
+                  alt={selectedHistory.imageFilename || 'Generated image'}
+                  eager
+                />
               : <div className="history-detail-no-image"><WandSparkles size={24}/><span>IMAGE NOT STORED</span></div>}
             {selectedHistory.imageFilename && <div className="result-filename">{selectedHistory.imageFilename}</div>}
           </div>
