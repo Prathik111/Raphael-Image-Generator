@@ -531,6 +531,44 @@ async function fetchHistoryImageCached(id:string):Promise<string|null>{
   return request;
 }
 
+const historyThumbnailCache=new Map<string,string>();
+const historyThumbnailPending=new Map<string,Promise<string|null>>();
+function rememberHistoryThumbnail(id:string,dataUrl:string):void{
+  historyThumbnailCache.delete(id);
+  historyThumbnailCache.set(id,dataUrl);
+  while(historyThumbnailCache.size>100){
+    const oldest=historyThumbnailCache.keys().next().value;
+    if(oldest===undefined) break;
+    historyThumbnailCache.delete(oldest);
+  }
+}
+async function fetchHistoryThumbnailCached(id:string):Promise<string|null>{
+  const cached=historyThumbnailCache.get(id);
+  if(cached){
+    rememberHistoryThumbnail(id,cached);
+    return cached;
+  }
+  const pending=historyThumbnailPending.get(id);
+  if(pending) return pending;
+  const key='history://'+id;
+  const request=(async()=>{
+    const persisted=await readPersistedThumbnail(key);
+    if(persisted){
+      rememberHistoryThumbnail(id,persisted);
+      return persisted;
+    }
+    const url=await apiInvoke<string|null>('load_history_thumbnail',{id});
+    if(typeof url==='string' && url.startsWith('data:image/')){
+      rememberHistoryThumbnail(id,url);
+      void persistThumbnail(key,url);
+      return url;
+    }
+    return null;
+  })().finally(()=>historyThumbnailPending.delete(id));
+  historyThumbnailPending.set(id,request);
+  return request;
+}
+
 type ThumbnailState = 'loading' | 'ready' | 'error';
 
 const thumbnailCache = new Map<string,string>();
@@ -849,7 +887,9 @@ function HistoryImageThumbnail({
   eager?:boolean;
 }){
   const frameRef=useRef<HTMLSpanElement|null>(null);
-  const [src,setSrc]=useState<string|null>(item.imageDataUrl || historyImageCache.get(item.id) || null);
+  const [src,setSrc]=useState<string|null>(()=>eager
+    ? item.imageDataUrl || historyImageCache.get(item.id) || null
+    : historyThumbnailCache.get(item.id) || null);
   useEffect(()=>{
     if(!item.hasImage && !item.imageDataUrl){
       setSrc(null);
@@ -861,16 +901,37 @@ function HistoryImageThumbnail({
     let observer:IntersectionObserver|undefined;
     const load=()=>{
       if(!active || !visible || loading) return;
-      const cached=item.imageDataUrl || historyImageCache.get(item.id);
+      if(eager){
+        const cached=item.imageDataUrl || historyImageCache.get(item.id);
+        if(cached){
+          if(!item.imageDataUrl) rememberHistoryImage(item.id,cached);
+          setSrc(cached);
+          return;
+        }
+        loading=true;
+        void fetchHistoryImageCached(item.id).then(url=>{
+          loading=false;
+          if(active && visible) setSrc(url);
+        }).catch(()=>{
+          loading=false;
+          if(active && visible) setSrc(null);
+        });
+        return;
+      }
+
+      const cached=historyThumbnailCache.get(item.id);
       if(cached){
-        if(!item.imageDataUrl) rememberHistoryImage(item.id,cached);
+        rememberHistoryThumbnail(item.id,cached);
         setSrc(cached);
         return;
       }
       loading=true;
-      void fetchHistoryImageCached(item.id).then(url=>{
+      void fetchHistoryThumbnailCached(item.id).then(async url=>{
+        // Fall back to a full image only if a preview cannot be generated or
+        // an older history item has no decodable source.
+        const resolved=url || await fetchHistoryImageCached(item.id);
         loading=false;
-        if(active && visible) setSrc(url);
+        if(active && visible) setSrc(resolved);
       }).catch(()=>{
         loading=false;
         if(active && visible) setSrc(null);
@@ -886,8 +947,6 @@ function HistoryImageThumbnail({
         if(visible){
           load();
         }else{
-          // Generated images are large data URLs; release this component's
-          // reference when scrolled away. The shared LRU keeps a small hot set.
           setSrc(null);
         }
       },{rootMargin:'180px'});
@@ -1513,16 +1572,16 @@ function App(){
         latestShowcaseImageRequest.current='';
         setHistoryShowcaseImage(null);
       }else{
-        const cachedImage=historyImageCache.get(newestWithImage.id);
-        if(cachedImage){
-          setHistoryShowcaseImage({id:newestWithImage.id,src:cachedImage});
+        const cachedPreview=historyThumbnailCache.get(newestWithImage.id);
+        if(cachedPreview){
+          setHistoryShowcaseImage({id:newestWithImage.id,src:cachedPreview});
           latestShowcaseImageRequest.current=newestWithImage.id;
         }else if(latestShowcaseImageRequest.current!==newestWithImage.id){
           latestShowcaseImageRequest.current=newestWithImage.id;
-          void fetchHistoryImageCached(newestWithImage.id).then(imageDataUrl=>{
+          void fetchHistoryThumbnailCached(newestWithImage.id).then(previewUrl=>{
             if(latestShowcaseImageRequest.current!==newestWithImage.id) return;
-            if(imageDataUrl){
-              setHistoryShowcaseImage({id:newestWithImage.id,src:imageDataUrl});
+            if(previewUrl){
+              setHistoryShowcaseImage({id:newestWithImage.id,src:previewUrl});
             }else{
               latestShowcaseImageRequest.current='';
               setHistoryShowcaseImage(null);
@@ -2588,7 +2647,7 @@ function App(){
     || latestShowcaseRecord?.imageDataUrl
     || (latestShowcaseRecord && historyShowcaseImage?.id===latestShowcaseRecord.id
       ? historyShowcaseImage.src
-      : latestShowcaseRecord ? historyImageCache.get(latestShowcaseRecord.id) : undefined);
+      : latestShowcaseRecord ? historyThumbnailCache.get(latestShowcaseRecord.id) : undefined);
 
   return <div className="app-shell">
     <iframe className="raphael-bg" src="/raphael-background.html" title="Raphael background" aria-hidden="true"/>
