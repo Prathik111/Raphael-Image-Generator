@@ -512,7 +512,10 @@ function rememberHistoryImage(id:string,dataUrl:string):void{
 }
 async function fetchHistoryImageCached(id:string):Promise<string|null>{
   const cached=historyImageCache.get(id);
-  if(cached) return cached;
+  if(cached){
+    rememberHistoryImage(id,cached);
+    return cached;
+  }
   const pending=historyImagePending.get(id);
   if(pending) return pending;
   const request=apiInvoke<string|null>('load_history_image',{id})
@@ -1316,6 +1319,7 @@ function App(){
   const [comfyStatus,setComfyStatus]=useState('idle');
   const [resultImage,setResultImage]=useState('');
   const [resultFilename,setResultFilename]=useState('');
+  const [historyShowcaseImage,setHistoryShowcaseImage]=useState<{id:string;src:string}|null>(null);
 
   const streamText=useRef('');
   // Protect in-progress LAN edits from an older host-settings poll response.
@@ -1488,16 +1492,31 @@ function App(){
       // Fetch only the newest image for the showcase. The remaining history
       // thumbnails are requested only when their cards approach the viewport.
       const newestWithImage=items.find(item=>item.hasImage);
-      if(newestWithImage && (
-        latestShowcaseImageRequest.current!==newestWithImage.id
-        || !historyImageCache.has(newestWithImage.id)
-      )){
-        latestShowcaseImageRequest.current=newestWithImage.id;
-        void fetchHistoryImageCached(newestWithImage.id).then(imageDataUrl=>{
-          if(!imageDataUrl) latestShowcaseImageRequest.current='';
-          // fetchHistoryImageCached stores the URL in the bounded LRU; don't
-          // copy a multi-megabyte data URL into the entire history state.
-        }).catch(()=>{latestShowcaseImageRequest.current='';});
+      if(!newestWithImage){
+        latestShowcaseImageRequest.current='';
+        setHistoryShowcaseImage(null);
+      }else{
+        const cachedImage=historyImageCache.get(newestWithImage.id);
+        if(cachedImage){
+          setHistoryShowcaseImage({id:newestWithImage.id,src:cachedImage});
+          latestShowcaseImageRequest.current=newestWithImage.id;
+        }else if(latestShowcaseImageRequest.current!==newestWithImage.id){
+          latestShowcaseImageRequest.current=newestWithImage.id;
+          void fetchHistoryImageCached(newestWithImage.id).then(imageDataUrl=>{
+            if(latestShowcaseImageRequest.current!==newestWithImage.id) return;
+            if(imageDataUrl){
+              setHistoryShowcaseImage({id:newestWithImage.id,src:imageDataUrl});
+            }else{
+              latestShowcaseImageRequest.current='';
+              setHistoryShowcaseImage(null);
+            }
+          }).catch(()=>{
+            if(latestShowcaseImageRequest.current===newestWithImage.id){
+              latestShowcaseImageRequest.current='';
+              setHistoryShowcaseImage(null);
+            }
+          });
+        }
       }
     }catch(e){
       if(showError) setError('Could not load host generation history: '+String(e));
@@ -2547,9 +2566,12 @@ function App(){
   }
 
   const selectedHistory=selectedHistoryId && selectedHistoryDetails?.id===selectedHistoryId ? selectedHistoryDetails : undefined;
-  const latestShowcaseRecord=history.find(item=>item.imageDataUrl || (item.hasImage && historyImageCache.has(item.id)));
-  const latestShowcaseImage=resultImage || latestShowcaseRecord?.imageDataUrl
-    || (latestShowcaseRecord ? historyImageCache.get(latestShowcaseRecord.id) : undefined);
+  const latestShowcaseRecord=history.find(item=>item.hasImage || item.imageDataUrl);
+  const latestShowcaseImage=resultImage
+    || latestShowcaseRecord?.imageDataUrl
+    || (latestShowcaseRecord && historyShowcaseImage?.id===latestShowcaseRecord.id
+      ? historyShowcaseImage.src
+      : latestShowcaseRecord ? historyImageCache.get(latestShowcaseRecord.id) : undefined);
 
   return <div className="app-shell">
     <iframe className="raphael-bg" src="/raphael-background.html" title="Raphael background" aria-hidden="true"/>
