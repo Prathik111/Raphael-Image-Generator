@@ -399,6 +399,15 @@ const stages: Array<{key: Stage; label: string}> = [
   {key:'recorded',label:'RECORDED'},
 ];
 
+// crypto.randomUUID() is restricted to secure contexts in browsers. LAN clients often
+// open the host over plain HTTP, so use a compatible ID fallback there.
+function createGenerationId():string{
+  if(typeof globalThis.crypto!=='undefined' && typeof globalThis.crypto.randomUUID==='function'){
+    return globalThis.crypto.randomUUID();
+  }
+  return 'gen-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2)+'-'+Math.random().toString(36).slice(2);
+}
+
 async function apiInvoke<T>(command:string, args:Record<string, unknown> = {}):Promise<T>{
   if(isTauriRuntime){
     return invoke<T>(command, args);
@@ -2013,7 +2022,7 @@ function App(){
         maxCharacterLoras:generationDraft.maxCharacterLoras,
       };
       const record:GenerationRecord={
-        id:crypto.randomUUID(),
+        id:createGenerationId(),
         timestamp:new Date().toISOString(),
         provider:llm.provider,
         model:llm.model,
