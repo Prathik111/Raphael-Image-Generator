@@ -1745,6 +1745,15 @@ async fn web_command(
         }
         "history_revision"=>serde_json::to_value(history_revision(state.app.clone()).await?).map_err(|e|e.to_string()),
         "load_history"=>serde_json::to_value(load_history(state.app.clone()).await?).map_err(|e|e.to_string()),
+        "load_history_index"=>serde_json::to_value(load_history_index(state.app.clone()).await?).map_err(|e|e.to_string()),
+        "load_history_item"=>{
+            let id=req_value.get("id").and_then(Value::as_str).ok_or_else(||"history item id is required".to_string())?;
+            serde_json::to_value(load_history_item(state.app.clone(),id.to_string()).await?).map_err(|e|e.to_string())
+        }
+        "load_history_image"=>{
+            let id=req_value.get("id").and_then(Value::as_str).ok_or_else(||"history image id is required".to_string())?;
+            serde_json::to_value(load_history_image(state.app.clone(),id.to_string()).await?).map_err(|e|e.to_string())
+        }
         "append_history"=>{
             let payload=body.get("payload").cloned().unwrap_or(Value::Null);
             serde_json::to_value(append_history(state.app.clone(),payload).await?).map_err(|e|e.to_string())
@@ -2057,6 +2066,30 @@ async fn load_history(app:AppHandle)->Result<Vec<HistoryRecord>,String>{
 }
 
 #[tauri::command]
+async fn load_history_index(app:AppHandle)->Result<Vec<HistoryRecord>,String>{
+    let path=history_path(&app)?;
+    tokio::task::spawn_blocking(move || load_history_index_file(&path))
+        .await
+        .map_err(|e|format!("History index read worker failed: {e}"))?
+}
+
+#[tauri::command]
+async fn load_history_item(app:AppHandle,id:String)->Result<Value,String>{
+    let path=history_path(&app)?;
+    tokio::task::spawn_blocking(move || load_history_item_file(&path,&id))
+        .await
+        .map_err(|e|format!("History item read worker failed: {e}"))?
+}
+
+#[tauri::command]
+async fn load_history_image(app:AppHandle,id:String)->Result<Option<String>,String>{
+    let path=history_path(&app)?;
+    tokio::task::spawn_blocking(move || load_history_image_file(&path,&id))
+        .await
+        .map_err(|e|format!("History image read worker failed: {e}"))?
+}
+
+#[tauri::command]
 async fn append_history(app:AppHandle,payload:Value)->Result<HistoryRecord,String>{
     let path=history_path(&app)?;
     tokio::task::spawn_blocking(move || append_history_file(&path,payload))
@@ -2234,7 +2267,7 @@ pub fn run(){
         .invoke_handler(tauri::generate_handler![
             pick_folder,discover_raphael_config,discover_raphael_roots,scan_library,list_provider_models,
             prepare_generation,stream_llm,parse_prompt_pair,finalize_prompt_pair,build_workflow,inject_prompts,
-            submit_to_comfy,monitor_comfy_generation,start_generation,stop_generation,history_revision,load_history,append_history,path_to_data_url,start_web_host,get_web_host_shared_settings,update_web_host_llm,update_web_host_generation_settings,stop_web_host
+            submit_to_comfy,monitor_comfy_generation,start_generation,stop_generation,history_revision,load_history,load_history_index,load_history_item,load_history_image,append_history,path_to_data_url,start_web_host,get_web_host_shared_settings,update_web_host_llm,update_web_host_generation_settings,stop_web_host
         ])
         .run(tauri::generate_context!())
         .expect("error while running Raphael Prompt Forge");
