@@ -1673,10 +1673,15 @@ async fn web_command(
         "get_host_llm_config"=>{
             let settings = state.llm.lock().await.clone();
             let generation_settings=public_generation_settings(&*state.generation_settings.lock().await);
+            // Expose only non-secret LLM configuration to LAN clients. The
+            // API key deliberately stays host-side and is never serialized here.
             serde_json::to_value(json!({
                 "provider": settings.provider,
                 "baseUrl": settings.base_url,
                 "model": settings.model,
+                "temperature": settings.temperature,
+                "maxTokens": settings.max_tokens,
+                "contextTokens": settings.context_tokens,
                 "generationSettings": generation_settings
             })).map_err(|e|e.to_string())
         }
