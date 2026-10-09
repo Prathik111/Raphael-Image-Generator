@@ -863,6 +863,7 @@ function HistoryImageThumbnail({
       if(!active || !visible || loading) return;
       const cached=item.imageDataUrl || historyImageCache.get(item.id);
       if(cached){
+        if(!item.imageDataUrl) rememberHistoryImage(item.id,cached);
         setSrc(cached);
         return;
       }
