@@ -446,14 +446,14 @@ function loadRandomLoraUsage():RandomLoraUsage{
 function weightedLoraSample<T extends {id:string}>(pool:T[],count:number,usage:RandomLoraUsage):T[]{
   const remaining=[...pool];
   const selected:T[]=[];
-  const recoveryRolls=5;
+  const recoveryRolls=12;
   while(selected.length<Math.max(0,count) && remaining.length){
     const weights=remaining.map(item=>{
       const last=usage.lastSelected[item.id];
       if(!Number.isFinite(last)) return 1;
       const age=Math.max(0,usage.generation-(last as number));
       const recovery=Math.min(1,age/recoveryRolls);
-      // Newly used LoRAs retain a small chance, then recover over ~5 successful stack rolls.
+      // Newly used LoRAs retain a tiny chance, then recover gradually over ~12 stack rolls.
       return 0.015+0.985*Math.pow(recovery,2.3);
     });
     const total=weights.reduce((sum,weight)=>sum+weight,0);
@@ -523,6 +523,78 @@ type ThumbnailState = 'loading' | 'ready' | 'error';
 
 const thumbnailCache = new Map<string,string>();
 const thumbnailPending = new Map<string,Promise<string>>();
+const thumbnailDbName='raphael-image-generator-thumbnails';
+const thumbnailStoreName='thumbnails';
+let thumbnailDbPromise:Promise<IDBDatabase|null>|null=null;
+
+function openThumbnailDb():Promise<IDBDatabase|null>{
+  if(typeof indexedDB==='undefined') return Promise.resolve(null);
+  if(thumbnailDbPromise) return thumbnailDbPromise;
+  thumbnailDbPromise=new Promise(resolve=>{
+    try{
+      const request=indexedDB.open(thumbnailDbName,1);
+      request.onupgradeneeded=()=>{
+        const db=request.result;
+        if(!db.objectStoreNames.contains(thumbnailStoreName)){
+          db.createObjectStore(thumbnailStoreName,{keyPath:'key'});
+        }
+      };
+      request.onsuccess=()=>resolve(request.result);
+      request.onerror=()=>resolve(null);
+      request.onblocked=()=>resolve(null);
+    }catch{
+      resolve(null);
+    }
+  });
+  return thumbnailDbPromise;
+}
+
+async function readPersistedThumbnail(key:string):Promise<string|null>{
+  const db=await openThumbnailDb();
+  if(!db) return null;
+  return new Promise(resolve=>{
+    try{
+      const request=db.transaction(thumbnailStoreName,'readonly').objectStore(thumbnailStoreName).get(key);
+      request.onsuccess=()=>{
+        const value=request.result as {dataUrl?:unknown}|undefined;
+        resolve(typeof value?.dataUrl==='string' && value.dataUrl.startsWith('data:image/') ? value.dataUrl : null);
+      };
+      request.onerror=()=>resolve(null);
+    }catch{
+      resolve(null);
+    }
+  });
+}
+
+async function persistThumbnail(key:string,dataUrl:string):Promise<void>{
+  // Avoid filling browser storage with unusually large preview assets.
+  if(dataUrl.length>1_000_000) return;
+  const db=await openThumbnailDb();
+  if(!db) return;
+  await new Promise<void>(resolve=>{
+    try{
+      const transaction=db.transaction(thumbnailStoreName,'readwrite');
+      transaction.objectStore(thumbnailStoreName).put({key,dataUrl,savedAt:Date.now()});
+      transaction.oncomplete=()=>resolve();
+      transaction.onerror=()=>resolve();
+      transaction.onabort=()=>resolve();
+    }catch{
+      resolve();
+    }
+  });
+  // Keep a bounded cache; IndexedDB persists across reloads, but should not grow forever.
+  try{
+    const transaction=db.transaction(thumbnailStoreName,'readwrite');
+    const store=transaction.objectStore(thumbnailStoreName);
+    const request=store.getAll();
+    request.onsuccess=()=>{
+      const rows=(request.result as Array<{key:string;savedAt?:number}>) || [];
+      if(rows.length<=300) return;
+      rows.sort((a,b)=>(a.savedAt || 0)-(b.savedAt || 0));
+      for(const row of rows.slice(0,rows.length-250)) store.delete(row.key);
+    };
+  }catch{}
+}
 
 function thumbnailReferences(reference?:string):string[]{
   if(!reference) return [];
@@ -540,30 +612,37 @@ async function fetchModelThumbnailReference(reference:string):Promise<string>{
   const pending = thumbnailPending.get(reference);
   if(pending) return pending;
 
-  const request = withThumbnailConcurrency(async()=>{
-    let lastError:unknown;
-    for(let attempt=0; attempt<3; attempt++){
-      try{
-        const url=await apiInvoke<string>('path_to_data_url',{path:reference});
-        if(!url || !url.startsWith('data:image/')){
-          throw new Error('Registry returned an invalid thumbnail response.');
-        }
-        thumbnailCache.set(reference,url);
-        return url;
-      }catch(error){
-        lastError=error;
-        if(attempt<2){
-          await new Promise(resolve=>setTimeout(resolve,250 * (2 ** attempt)));
+  const request = (async()=>{
+    const persisted=await readPersistedThumbnail(reference);
+    if(persisted){
+      thumbnailCache.set(reference,persisted);
+      return persisted;
+    }
+    return withThumbnailConcurrency(async()=>{
+      let lastError:unknown;
+      for(let attempt=0; attempt<3; attempt++){
+        try{
+          const url=await apiInvoke<string>('path_to_data_url',{path:reference});
+          if(!url || !url.startsWith('data:image/')){
+            throw new Error('Registry returned an invalid thumbnail response.');
+          }
+          thumbnailCache.set(reference,url);
+          void persistThumbnail(reference,url);
+          return url;
+        }catch(error){
+          lastError=error;
+          if(attempt<2){
+            await new Promise(resolve=>setTimeout(resolve,250 * (2 ** attempt)));
+          }
         }
       }
-    }
-    throw lastError instanceof Error ? lastError : new Error(String(lastError || 'Thumbnail request failed.'));
-  }).finally(()=>thumbnailPending.delete(reference));
+      throw lastError instanceof Error ? lastError : new Error(String(lastError || 'Thumbnail request failed.'));
+    });
+  })().finally(()=>thumbnailPending.delete(reference));
 
   thumbnailPending.set(reference,request);
   return request;
 }
-
 async function fetchModelThumbnail(references:string[]):Promise<string>{
   let lastError:unknown;
   for(const reference of references){
