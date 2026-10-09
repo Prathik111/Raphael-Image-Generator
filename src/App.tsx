@@ -3261,6 +3261,7 @@ function App(){
             <section className="settings-section settings-card">
               <div className="settings-section-title">LoRA SELECTION LIMITS</div>
               <div className="settings-helper">MAX CHARACTER LoRAs controls how many character-identity LoRAs can be manually selected or included by RANDOMIZE LORAS and AUTO GENERATE.</div>
+              <div className="settings-helper">Random picks use recency weights: a selected LoRA's reuse weight drops sharply, then recovers over about 12 successful randomized stacks. Manual LoRA selections are unaffected.</div>
               <div className="settings-form-grid">
                 <label className="settings-field"><span>MAX LoRAs</span><input type="number" min={1} max={absoluteMaxLoraLimit} value={generationDraft.maxLoras} onChange={e=>setGenerationDraft(d=>({...d,maxLoras:Math.max(1,Number(e.target.value))}))}/></label>
                 <label className="settings-field"><span>MAX CHARACTER LoRAs</span><input type="number" min={1} max={Math.min(absoluteMaxLoraLimit,generationDraft.maxLoras)} value={generationDraft.maxCharacterLoras} onChange={e=>setGenerationDraft(d=>({...d,maxCharacterLoras:Math.max(1,Math.min(d.maxLoras,Number(e.target.value)||1))}))}/></label>
