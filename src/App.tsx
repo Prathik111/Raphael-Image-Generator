@@ -1118,6 +1118,7 @@ function App(){
   // the whole archive (which can contain hundreds of MiB of base64 image data).
   const historyRevisionRef=useRef('');
   const historyLoadInFlight=useRef(false);
+  const latestShowcaseImageRequest=useRef('');
 
   const selected=useMemo(
     ()=>library?.checkpoints.find(x=>x.id===selectedId) || library?.checkpoints[0],
@@ -1258,10 +1259,31 @@ function App(){
       const revision=await apiInvoke<string>('history_revision');
       if(revision===historyRevisionRef.current) return;
 
-      const records=await apiInvoke<Array<{payload:GenerationRecord}>>('load_history');
-      if(!Array.isArray(records)) throw new Error('History response was not a list.');
-      setHistory(records.map(x=>x.payload).filter(Boolean));
+      const records=await apiInvoke<Array<{payload:GenerationRecord}>>('load_history_index');
+      if(!Array.isArray(records)) throw new Error('History index response was not a list.');
+      const items=records.map(x=>({
+        ...x.payload,
+        hasImage:Boolean(x.payload?.hasImage || x.payload?.imageDataUrl),
+        imageDataUrl:undefined,
+      })).filter(item=>Boolean(item.id));
+      setHistory(items);
       historyRevisionRef.current=revision;
+
+      // Fetch only the newest image for the showcase. The remaining history
+      // thumbnails are requested only when their cards approach the viewport.
+      const newestWithImage=items.find(item=>item.hasImage);
+      if(newestWithImage && latestShowcaseImageRequest.current!==newestWithImage.id){
+        latestShowcaseImageRequest.current=newestWithImage.id;
+        void fetchHistoryImageCached(newestWithImage.id).then(imageDataUrl=>{
+          if(imageDataUrl){
+            setHistory(current=>current.map(item=>item.id===newestWithImage.id
+              ? {...item,imageDataUrl}
+              : item));
+          }else{
+            latestShowcaseImageRequest.current='';
+          }
+        }).catch(()=>{latestShowcaseImageRequest.current='';});
+      }
     }catch(e){
       if(showError) setError('Could not load host generation history: '+String(e));
     }finally{
@@ -1567,6 +1589,7 @@ function App(){
     setError('');
 
     const manualIds=manualLoraIds.filter(id=>allLoras.some(lora=>lora.id===id));
+    const randomUsage=loadRandomLoraUsage();
     const manualCharacterCount=manualIds.reduce((count,id)=>{
       const lora=allLoras.find(item=>item.id===id);
       return count+(lora && isCharacterLoraForCheckpoint(lora,selected) ? 1 : 0);
@@ -1611,14 +1634,12 @@ function App(){
       const characterPool=compatibleLoras
         .filter(lora=>!manualIds.includes(lora.id))
         .filter(lora=>!failedRandomIds.has(lora.id))
-        .filter(lora=>isCharacterLoraForCheckpoint(lora,selected))
-        .sort(()=>Math.random()-0.5);
+        .filter(lora=>isCharacterLoraForCheckpoint(lora,selected));
 
       const availablePool=compatibleLoras
         .filter(lora=>!manualIds.includes(lora.id))
         .filter(lora=>!failedRandomIds.has(lora.id))
-        .filter(lora=>!isCharacterLoraForCheckpoint(lora,selected))
-        .sort(()=>Math.random()-0.5);
+        .filter(lora=>!isCharacterLoraForCheckpoint(lora,selected));
 
       const randomSlots=Math.max(
         0,
@@ -1641,10 +1662,10 @@ function App(){
         ? Math.floor(Math.random()*characterSlots)+1
         : 0;
 
-      randomIds.push(...characterPool.slice(0,randomCharacterCount).map(lora=>lora.id));
+      randomIds.push(...weightedLoraSample(characterPool,randomCharacterCount,randomUsage).map(lora=>lora.id));
 
       const remainingSlots=Math.max(0,randomSlots-randomIds.length);
-      randomIds.push(...availablePool.slice(0,remainingSlots).map(lora=>lora.id));
+      randomIds.push(...weightedLoraSample(availablePool,remainingSlots,randomUsage).map(lora=>lora.id));
 
       const combinedIds=[...manualIds,...randomIds];
 
@@ -1660,6 +1681,7 @@ function App(){
             registryUrl:registryUrl || null,
           },
         });
+        recordRandomLoraSelection(randomIds);
         setSelectedLoraIds(combinedIds);
         setPrepared(result);
         setStageStatus('compatibility','done');
@@ -2164,11 +2186,14 @@ function App(){
         rationale:pair.rationale,
         generationSettings:historySettings,
         imageDataUrl:generatedImageDataUrl || undefined,
+        hasImage:Boolean(generatedImageDataUrl),
         imageFilename:generatedImageFilename || undefined,
         workflow:injected,
         comfyPromptId:promptId,
       };
       await apiInvoke('append_history',{payload:record});
+      if(generatedImageDataUrl) historyImageCache.set(record.id,generatedImageDataUrl);
+      historyRevisionRef.current=await apiInvoke<string>('history_revision').catch(()=>historyRevisionRef.current);
       setHistory(x=>[record,...x].slice(0,100));
       setSelectedHistoryId(record.id);
       setStage('recorded');
@@ -2200,6 +2225,16 @@ function App(){
     setHistorySettingsVisible(false);
     setTab('history');
     setSettingsOpen(false);
+    const item=history.find(record=>record.id===id);
+    if(item?.hasImage && !item.imageDataUrl){
+      void fetchHistoryImageCached(id).then(imageDataUrl=>{
+        if(imageDataUrl){
+          setHistory(current=>current.map(record=>record.id===id
+            ? {...record,imageDataUrl}
+            : record));
+        }
+      }).catch(error=>setError('Could not load saved generation image: '+String(error)));
+    }
   }
 
   function selectCheckpoint(id:string){
@@ -2312,25 +2347,25 @@ function App(){
 
       <div className="showcase-heading">
         <span>IMAGE SHOWCASE</span>
-        <span>{history.filter(item=>item.imageDataUrl).length}</span>
+        <span>{history.filter(item=>item.hasImage || item.imageDataUrl).length}</span>
       </div>
       <div className="image-showcase">
         <div className="showcase-main">
-          {(resultImage || history.find(item=>item.imageDataUrl)?.imageDataUrl)
-            ? <img src={resultImage || history.find(item=>item.imageDataUrl)?.imageDataUrl || ''} alt="Latest generated result"/>
+          {(resultImage || history.find(item=>item.imageDataUrl)?.imageDataUrl || (history.find(item=>item.hasImage && historyImageCache.has(item.id)) ? historyImageCache.get(history.find(item=>item.hasImage && historyImageCache.has(item.id))!.id) : null))
+            ? <img src={resultImage || history.find(item=>item.imageDataUrl)?.imageDataUrl || (history.find(item=>item.hasImage && historyImageCache.has(item.id)) ? historyImageCache.get(history.find(item=>item.hasImage && historyImageCache.has(item.id))!.id) : '') || ''} alt="Latest generated result"/>
             : <div className="showcase-empty"><WandSparkles size={22}/><span>NO GENERATED IMAGE</span></div>}
         </div>
         <div className="showcase-meta">
-          <b>{resultFilename || history.find(item=>item.imageDataUrl)?.checkpoint.name || 'READY FOR GENERATION'}</b>
+          <b>{resultFilename || history.find(item=>item.imageDataUrl)?.checkpoint.name || history.find(item=>item.hasImage)?.checkpoint.name || 'READY FOR GENERATION'}</b>
           <span>{comfyStatus==='done' ? 'LATEST GENERATION' : selected?.name || 'SELECT A CHECKPOINT'}</span>
         </div>
         <div className="showcase-strip">
-          {history.filter(item=>item.imageDataUrl).slice(0,6).map(item=>
+          {history.filter(item=>item.hasImage || item.imageDataUrl).slice(0,6).map(item=>
             <button className="showcase-thumb" key={item.id} onClick={()=>openHistory(item.id)} title={new Date(item.timestamp).toLocaleString()}>
-              <img src={item.imageDataUrl} alt=""/>
+              <HistoryImageThumbnail item={item}/>
             </button>
           )}
-          {!history.some(item=>item.imageDataUrl) && <div className="showcase-no-history">NO HISTORY</div>}
+          {!history.some(item=>item.hasImage || item.imageDataUrl) && <div className="showcase-no-history">NO HISTORY</div>}
         </div>
       </div>
 
@@ -2551,7 +2586,9 @@ function App(){
 
         {!selectedHistoryId && history.length>0 && <div className="history-list">
           {history.map(item=><button className="history-list-item" key={item.id} onClick={()=>openHistory(item.id)}>
-            <div className="history-list-thumb">{item.imageDataUrl ? <img src={item.imageDataUrl} alt=""/> : <WandSparkles size={18}/>}</div>
+            <div className="history-list-thumb">{item.hasImage || item.imageDataUrl
+              ? <HistoryImageThumbnail item={item}/>
+              : <WandSparkles size={18}/>}</div>
             <div>
               <b>{new Date(item.timestamp).toLocaleString()}</b>
               <span>{item.checkpoint.name}</span>
