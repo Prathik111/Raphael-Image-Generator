@@ -429,6 +429,96 @@ async function apiInvoke<T>(command:string, args:Record<string, unknown> = {}):P
   return value as T;
 }
 
+const randomLoraUsageStorageKey='raphael-image-generator.random-lora-usage.v1';
+interface RandomLoraUsage {
+  generation:number;
+  lastSelected:Record<string,number>;
+}
+function loadRandomLoraUsage():RandomLoraUsage{
+  try{
+    const parsed=JSON.parse(window.localStorage.getItem(randomLoraUsageStorageKey) || 'null') as Partial<RandomLoraUsage>|null;
+    if(parsed && Number.isFinite(parsed.generation) && parsed.lastSelected && typeof parsed.lastSelected==='object'){
+      return {generation:Math.max(0,Math.floor(parsed.generation as number)),lastSelected:parsed.lastSelected};
+    }
+  }catch{}
+  return {generation:0,lastSelected:{}};
+}
+function weightedLoraSample<T extends {id:string}>(pool:T[],count:number,usage:RandomLoraUsage):T[]{
+  const remaining=[...pool];
+  const selected:T[]=[];
+  const recoveryRolls=5;
+  while(selected.length<Math.max(0,count) && remaining.length){
+    const weights=remaining.map(item=>{
+      const last=usage.lastSelected[item.id];
+      if(!Number.isFinite(last)) return 1;
+      const age=Math.max(0,usage.generation-(last as number));
+      const recovery=Math.min(1,age/recoveryRolls);
+      // Newly used LoRAs retain a small chance, then recover over ~5 successful stack rolls.
+      return 0.015+0.985*Math.pow(recovery,2.3);
+    });
+    const total=weights.reduce((sum,weight)=>sum+weight,0);
+    let roll=Math.random()*total;
+    let index=weights.length-1;
+    for(let i=0;i<weights.length;i++){
+      roll-=weights[i];
+      if(roll<0){index=i;break;}
+    }
+    selected.push(remaining.splice(index,1)[0]);
+  }
+  return selected;
+}
+function recordRandomLoraSelection(ids:string[]):void{
+  if(!ids.length) return;
+  try{
+    const usage=loadRandomLoraUsage();
+    const generation=usage.generation+1;
+    const lastSelected={...usage.lastSelected};
+    for(const id of ids) lastSelected[id]=generation;
+    // Prune stale entries so removed Registry models do not accumulate forever.
+    const keys=Object.keys(lastSelected);
+    if(keys.length>1500){
+      for(const key of keys.sort((a,b)=>lastSelected[a]-lastSelected[b]).slice(0,keys.length-1000)){
+        delete lastSelected[key];
+      }
+    }
+    window.localStorage.setItem(randomLoraUsageStorageKey,JSON.stringify({generation,lastSelected}));
+  }catch{}
+}
+
+let activeThumbnailRequests=0;
+const thumbnailRequestQueue:Array<()=>void>=[];
+async function withThumbnailConcurrency<T>(task:()=>Promise<T>):Promise<T>{
+  if(activeThumbnailRequests>=6){
+    await new Promise<void>(resolve=>thumbnailRequestQueue.push(resolve));
+  }
+  activeThumbnailRequests++;
+  try{return await task();}
+  finally{
+    activeThumbnailRequests--;
+    thumbnailRequestQueue.shift()?.();
+  }
+}
+
+const historyImageCache=new Map<string,string>();
+const historyImagePending=new Map<string,Promise<string|null>>();
+async function fetchHistoryImageCached(id:string):Promise<string|null>{
+  const cached=historyImageCache.get(id);
+  if(cached) return cached;
+  const pending=historyImagePending.get(id);
+  if(pending) return pending;
+  const request=apiInvoke<string|null>('load_history_image',{id})
+    .then(url=>{
+      if(typeof url==='string' && url.startsWith('data:image/')){
+        historyImageCache.set(id,url);
+        return url;
+      }
+      return null;
+    })
+    .finally(()=>historyImagePending.delete(id));
+  historyImagePending.set(id,request);
+  return request;
+}
+
 type ThumbnailState = 'loading' | 'ready' | 'error';
 
 const thumbnailCache = new Map<string,string>();
@@ -450,7 +540,7 @@ async function fetchModelThumbnailReference(reference:string):Promise<string>{
   const pending = thumbnailPending.get(reference);
   if(pending) return pending;
 
-  const request = (async()=>{
+  const request = withThumbnailConcurrency(async()=>{
     let lastError:unknown;
     for(let attempt=0; attempt<3; attempt++){
       try{
@@ -468,7 +558,7 @@ async function fetchModelThumbnailReference(reference:string):Promise<string>{
       }
     }
     throw lastError instanceof Error ? lastError : new Error(String(lastError || 'Thumbnail request failed.'));
-  })().finally(()=>thumbnailPending.delete(reference));
+  }).finally(()=>thumbnailPending.delete(reference));
 
   thumbnailPending.set(reference,request);
   return request;
@@ -535,7 +625,7 @@ function ModelThumbnail({model,iconSize=18}:{model:LibrarySnapshot['checkpoints'
         if(!entries[0]?.isIntersecting) return;
         observer?.disconnect();
         load();
-      },{rootMargin:'160px'});
+      },{rootMargin:'360px'});
       observer.observe(frameRef.current);
     }
 
@@ -568,6 +658,39 @@ function ModelThumbnail({model,iconSize=18}:{model:LibrarySnapshot['checkpoints'
       : <Layers3 size={iconSize} aria-hidden="true"/>}
   </span>;
 }
+
+function HistoryImageThumbnail({item}:{item:GenerationRecord}){
+  const frameRef=useRef<HTMLSpanElement|null>(null);
+  const [src,setSrc]=useState<string|null>(item.imageDataUrl || historyImageCache.get(item.id) || null);
+  useEffect(()=>{
+    if(item.imageDataUrl){setSrc(item.imageDataUrl);return;}
+    const cached=historyImageCache.get(item.id);
+    if(cached){setSrc(cached);return;}
+    if(!item.hasImage){setSrc(null);return;}
+    let active=true;
+    let observer:IntersectionObserver|undefined;
+    const load=()=>{
+      void fetchHistoryImageCached(item.id).then(url=>{
+        if(active) setSrc(url);
+      }).catch(()=>{if(active)setSrc(null);});
+    };
+    if(typeof IntersectionObserver==='undefined' || !frameRef.current){
+      load();
+    }else{
+      observer=new IntersectionObserver(entries=>{
+        if(!entries[0]?.isIntersecting) return;
+        observer?.disconnect();
+        load();
+      },{rootMargin:'140px'});
+      observer.observe(frameRef.current);
+    }
+    return ()=>{active=false;observer?.disconnect();};
+  },[item.id,item.hasImage,item.imageDataUrl]);
+  return <span ref={frameRef} className="history-image-thumbnail">
+    {src ? <img src={src} alt="" loading="lazy" decoding="async"/> : <WandSparkles size={16}/>}
+  </span>;
+}
+
 function extractJsonObject(raw:string):Record<string,unknown>{
   let clean=raw.trim();
   if(clean.includes('</think>')) clean=clean.slice(clean.lastIndexOf('</think>')+8).trim();
