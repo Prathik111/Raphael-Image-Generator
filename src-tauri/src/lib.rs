@@ -1989,6 +1989,31 @@ async fn start_web_host(
 }
 
 #[tauri::command]
+async fn get_web_host_shared_settings(state:tauri::State<'_,AppState>)->Result<Value,String>{
+    // This command is called by the desktop Tauri UI, not the LAN HTTP API.
+    // Clone the shared stores before awaiting them so the outer host lock is
+    // not held while reading settings.
+    let (llm_store,generation_settings_store)={
+        let host=state.web_host.lock().await;
+        let Some(runtime)=host.as_ref() else {
+            return Err("LAN web host is not running.".into());
+        };
+        (runtime.llm.clone(),runtime.generation_settings.clone())
+    };
+    let settings=llm_store.lock().await.clone();
+    let generation_settings=public_generation_settings(&*generation_settings_store.lock().await);
+    Ok(json!({
+        "provider":settings.provider,
+        "baseUrl":settings.base_url,
+        "model":settings.model,
+        "temperature":settings.temperature,
+        "maxTokens":settings.max_tokens,
+        "contextTokens":settings.context_tokens,
+        "generationSettings":generation_settings
+    }))
+}
+
+#[tauri::command]
 async fn update_web_host_llm(state:tauri::State<'_,AppState>,llm_settings:LlmSettings)->Result<(),String>{
     let host=state.web_host.lock().await;
     let Some(runtime)=host.as_ref() else {
@@ -2028,7 +2053,7 @@ pub fn run(){
         .invoke_handler(tauri::generate_handler![
             pick_folder,discover_raphael_config,discover_raphael_roots,scan_library,list_provider_models,
             prepare_generation,stream_llm,parse_prompt_pair,finalize_prompt_pair,build_workflow,inject_prompts,
-            submit_to_comfy,monitor_comfy_generation,start_generation,stop_generation,load_history,append_history,path_to_data_url,start_web_host,update_web_host_llm,update_web_host_generation_settings,stop_web_host
+            submit_to_comfy,monitor_comfy_generation,start_generation,stop_generation,load_history,append_history,path_to_data_url,start_web_host,get_web_host_shared_settings,update_web_host_llm,update_web_host_generation_settings,stop_web_host
         ])
         .run(tauri::generate_context!())
         .expect("error while running Raphael Prompt Forge");
