@@ -2586,6 +2586,37 @@ mod tests {
     }
 
     #[test]
+    fn history_index_keeps_images_out_of_metadata_and_loads_them_on_demand() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("generation-history.json");
+        let image = "data:image/png;base64,AQID";
+        append_history_file(
+            &path,
+            json!({"id":"generation-lazy-image-test","imageDataUrl":image,"checkpoint":{"name":"test"}}),
+        ).expect("history append should succeed");
+
+        let stored = std::fs::read_to_string(&path).expect("read compact history");
+        assert!(
+            !stored.contains(image),
+            "image bytes must not remain embedded in the history metadata file"
+        );
+
+        let index = load_history_index_file(&path).expect("load history index");
+        assert_eq!(index.len(), 1);
+        assert_eq!(index[0].payload["hasImage"], true);
+        assert!(index[0].payload.get("imageDataUrl").is_none());
+
+        assert_eq!(
+            load_history_image_file(&path, "generation-lazy-image-test")
+                .expect("load history image"),
+            Some(image.to_string())
+        );
+        let item = load_history_item_file(&path, "generation-lazy-image-test")
+            .expect("load full history item");
+        assert_eq!(item["imageDataUrl"], image);
+    }
+
+    #[test]
     fn history_archive_round_trips_image_payload_larger_than_two_mib() {
         let temp = tempfile::tempdir().expect("tempdir");
         let path = temp.path().join("generation-history.json");
