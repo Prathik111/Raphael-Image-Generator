@@ -1743,11 +1743,11 @@ async fn web_command(
             let request=serde_json::from_value::<InjectRequest>(req_value).map_err(|e|e.to_string())?;
             serde_json::to_value(inject_prompts(request)?).map_err(|e|e.to_string())
         }
-        "history_revision"=>serde_json::to_value(history_revision(state.app.clone())?).map_err(|e|e.to_string()),
-        "load_history"=>serde_json::to_value(load_history(state.app.clone())?).map_err(|e|e.to_string()),
+        "history_revision"=>serde_json::to_value(history_revision(state.app.clone()).await?).map_err(|e|e.to_string()),
+        "load_history"=>serde_json::to_value(load_history(state.app.clone()).await?).map_err(|e|e.to_string()),
         "append_history"=>{
             let payload=body.get("payload").cloned().unwrap_or(Value::Null);
-            serde_json::to_value(append_history(state.app.clone(),payload)?).map_err(|e|e.to_string())
+            serde_json::to_value(append_history(state.app.clone(),payload).await?).map_err(|e|e.to_string())
         }
         "path_to_data_url"=>{
             let path=req_value.get("path").and_then(|x|x.as_str())
@@ -1886,21 +1886,27 @@ fn append_history_file(path:&Path,payload:Value)->Result<HistoryRecord,String>{
 }
 
 #[tauri::command]
-fn history_revision(app:AppHandle)->Result<String,String>{
+async fn history_revision(app:AppHandle)->Result<String,String>{
     let path=history_path(&app)?;
-    history_revision_file(&path)
+    tokio::task::spawn_blocking(move || history_revision_file(&path))
+        .await
+        .map_err(|e|format!("History revision worker failed: {e}"))?
 }
 
 #[tauri::command]
-fn load_history(app:AppHandle)->Result<Vec<HistoryRecord>,String>{
+async fn load_history(app:AppHandle)->Result<Vec<HistoryRecord>,String>{
     let path=history_path(&app)?;
-    load_history_file(&path)
+    tokio::task::spawn_blocking(move || load_history_file(&path))
+        .await
+        .map_err(|e|format!("History read worker failed: {e}"))?
 }
 
 #[tauri::command]
-fn append_history(app:AppHandle,payload:Value)->Result<HistoryRecord,String>{
+async fn append_history(app:AppHandle,payload:Value)->Result<HistoryRecord,String>{
     let path=history_path(&app)?;
-    append_history_file(&path,payload)
+    tokio::task::spawn_blocking(move || append_history_file(&path,payload))
+        .await
+        .map_err(|e|format!("History write worker failed: {e}"))?
 }
 
 #[tauri::command]
