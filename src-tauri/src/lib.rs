@@ -2819,6 +2819,57 @@ mod tests {
     }
 
     #[test]
+    fn legacy_inline_history_is_compacted_and_gets_previews_on_first_index_read() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("generation-history.json");
+        let mut original_png = Vec::new();
+        image::DynamicImage::new_rgb8(640, 480)
+            .write_to(
+                &mut std::io::Cursor::new(&mut original_png),
+                image::ImageFormat::Png,
+            )
+            .expect("encode legacy image");
+        let original_url = format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(&original_png)
+        );
+        let archive = vec![HistoryRecord {
+            id: "legacy-record-test".into(),
+            timestamp: "123".into(),
+            payload: json!({
+                "id":"legacy-record-test",
+                "timestamp":"2026-10-09T10:00:00.000Z",
+                "checkpoint":{"name":"legacy checkpoint"},
+                "imageDataUrl":original_url,
+                "positivePrompt":"legacy prompt"
+            }),
+        }];
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&archive).expect("serialize legacy archive"),
+        ).expect("write legacy archive");
+
+        let index = load_history_index_file(&path).expect("load compact index");
+        assert_eq!(index.len(), 1);
+        assert_eq!(index[0].payload["hasImage"], true);
+        assert!(index[0].payload.get("imageDataUrl").is_none());
+
+        let compact_archive = std::fs::read_to_string(&path).expect("read compacted archive");
+        assert!(!compact_archive.contains("data:image/png;base64,"));
+        assert!(history_images_dir(&path).is_dir());
+        assert!(history_thumbnails_dir(&path).is_dir());
+
+        let preview = load_history_thumbnail_file(&path, "legacy-record-test")
+            .expect("load legacy preview")
+            .expect("preview should exist after migration");
+        assert!(preview.starts_with("data:image/jpeg;base64,"));
+        let full = load_history_image_file(&path, "legacy-record-test")
+            .expect("load original image")
+            .expect("original image should remain available");
+        assert_eq!(full, original_url);
+    }
+
+    #[test]
     fn history_archive_round_trips_image_payload_larger_than_two_mib() {
         let temp = tempfile::tempdir().expect("tempdir");
         let path = temp.path().join("generation-history.json");
