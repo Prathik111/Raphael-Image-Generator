@@ -1833,16 +1833,54 @@ async fn web_monitor_comfy(
 }
 
 fn now_id()->String{SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis().to_string()}
-fn history_path(app:&AppHandle)->Result<PathBuf,String>{let dir=app.path().app_data_dir().map_err(|e|e.to_string())?;fs::create_dir_all(&dir).map_err(|e|e.to_string())?;Ok(dir.join("generation-history.json"))}
+static HISTORY_FILE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn history_path(app:&AppHandle)->Result<PathBuf,String>{
+    let dir=app.path().app_data_dir().map_err(|e|e.to_string())?;
+    fs::create_dir_all(&dir).map_err(|e|e.to_string())?;
+    Ok(dir.join("generation-history.json"))
+}
+
+fn load_history_file(path:&Path)->Result<Vec<HistoryRecord>,String>{
+    let _guard=HISTORY_FILE_LOCK.lock()
+        .map_err(|_|"Generation history lock is poisoned.".to_string())?;
+    if !path.exists(){return Ok(vec![]);}
+    serde_json::from_slice(&fs::read(path).map_err(|e|e.to_string())?)
+        .map_err(|e|format!("Could not read generation history JSON: {e}"))
+}
+
+fn append_history_file(path:&Path,payload:Value)->Result<HistoryRecord,String>{
+    let _guard=HISTORY_FILE_LOCK.lock()
+        .map_err(|_|"Generation history lock is poisoned.".to_string())?;
+    let mut all:Vec<HistoryRecord>=if path.exists(){
+        serde_json::from_slice(&fs::read(path).map_err(|e|e.to_string())?)
+            .map_err(|e|format!("Could not read existing generation history JSON; refusing to overwrite it: {e}"))?
+    }else{
+        vec![]
+    };
+    let rec=HistoryRecord{id:now_id(),timestamp:now_id(),payload};
+    all.insert(0,rec.clone());
+    if all.len()>100{all.truncate(100);}
+    let serialized=serde_json::to_vec_pretty(&all).map_err(|e|e.to_string())?;
+    let temp=path.with_file_name(format!("generation-history-{}.tmp",now_id()));
+    fs::write(&temp,serialized).map_err(|e|format!("Could not write temporary generation history: {e}"))?;
+    if let Err(error)=fs::rename(&temp,path){
+        let _=fs::remove_file(&temp);
+        return Err(format!("Could not replace generation history file: {error}"));
+    }
+    Ok(rec)
+}
 
 #[tauri::command]
-fn load_history(app:AppHandle)->Result<Vec<HistoryRecord>,String>{let p=history_path(&app)?;if !p.exists(){return Ok(vec![])}serde_json::from_slice(&fs::read(p).map_err(|e|e.to_string())?).map_err(|e|e.to_string())}
+fn load_history(app:AppHandle)->Result<Vec<HistoryRecord>,String>{
+    let path=history_path(&app)?;
+    load_history_file(&path)
+}
 
 #[tauri::command]
 fn append_history(app:AppHandle,payload:Value)->Result<HistoryRecord,String>{
-    let p=history_path(&app)?;let mut all:Vec<HistoryRecord>=if p.exists(){serde_json::from_slice(&fs::read(&p).map_err(|e|e.to_string())?).unwrap_or_default()}else{vec![]};
-    let rec=HistoryRecord{id:now_id(),timestamp:now_id(),payload};all.insert(0,rec.clone());if all.len()>100{all.truncate(100);}
-    fs::write(p,serde_json::to_vec_pretty(&all).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;Ok(rec)
+    let path=history_path(&app)?;
+    append_history_file(&path,payload)
 }
 
 #[tauri::command]
