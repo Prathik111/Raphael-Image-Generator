@@ -1278,7 +1278,7 @@ function App(){
           maxTokens?:number;
           contextTokens?:number;
           generationSettings?:Partial<StoredGenerationSettings>;
-        }>('get_host_llm_config');
+        }>(isTauriRuntime ? 'get_web_host_shared_settings' : 'get_host_llm_config');
         if(!active || Date.now()-generationSettingsEditedAt.current<2000) return;
         const hostGeneration=hostConfig.generationSettings || {};
         const hostLlm={
