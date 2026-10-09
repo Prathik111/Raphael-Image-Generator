@@ -2070,7 +2070,12 @@ fn load_history_file(path:&Path)->Result<Vec<HistoryRecord>,String>{
 fn load_history_index_file(path:&Path)->Result<Vec<HistoryRecord>,String>{
     let _guard=HISTORY_FILE_LOCK.lock()
         .map_err(|_|"Generation history lock is poisoned.".to_string())?;
-    let all=read_history_records_file(path)?;
+    let mut all=read_history_records_file(path)?;
+    // Compact old inline-base64 archives once before returning the list. Without
+    // this migration, every lazy thumbnail request would parse the huge JSON
+    // archive again. Generate previews during migration so subsequent list
+    // refreshes and scrolling read only small metadata/preview files.
+    migrate_history_images(path,&mut all)?;
     for record in &mut all{
         hydrate_history_payload(path,&mut record.payload,false);
         // The history list only needs identity, timestamp, model summaries and
