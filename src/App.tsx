@@ -694,8 +694,24 @@ async function persistHistorySnapshot(items:GenerationRecord[]):Promise<void>{
   const db=await openThumbnailDb();
   if(!db) return;
   const compactItems=items.slice(0,100).map(item=>{
-    const {imageDataUrl,...metadata}=item;
-    return {...metadata,hasImage:Boolean(item.hasImage || imageDataUrl)};
+    const {
+      imageDataUrl,
+      workflow,
+      positivePrompt,
+      negativePrompt,
+      rationale,
+      generationSettings,
+      ...metadata
+    }=item;
+    // The persistent list only needs fields shown on each row. Prompt/workflow
+    // data is fetched on demand for a selected record.
+    return {
+      ...metadata,
+      hasImage:Boolean(item.hasImage || imageDataUrl),
+      workflow:null,
+      positivePrompt:'',
+      negativePrompt:'',
+    };
   });
   await new Promise<void>(resolve=>{
     try{
@@ -2580,9 +2596,19 @@ function App(){
       }
       historyRevisionRef.current=await apiInvoke<string>('history_revision').catch(()=>historyRevisionRef.current);
       const historySummary:GenerationRecord={
-        ...record,
-        imageDataUrl:undefined,
+        id:record.id,
+        timestamp:record.timestamp,
+        provider:record.provider,
+        model:record.model,
+        checkpoint:record.checkpoint,
+        loras:record.loras,
+        scene:record.scene,
+        positivePrompt:'',
+        negativePrompt:'',
         hasImage:Boolean(record.imageDataUrl),
+        workflow:null,
+        ...(record.comfyPromptId ? {comfyPromptId:record.comfyPromptId} : {}),
+        ...(record.imageFilename ? {imageFilename:record.imageFilename} : {}),
       };
       historyLoadedFromNetworkRef.current=true;
       setHistory(x=>[historySummary,...x].slice(0,100));
