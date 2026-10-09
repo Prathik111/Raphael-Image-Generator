@@ -1229,13 +1229,15 @@ function App(){
   },[generationDraft.llm,webHost,lanClientReady]);
 
   useEffect(()=>{
-    if(!isTauriRuntime || !webHost) return;
+    // The desktop host publishes its settings while hosting; LAN clients also
+    // write intentional settings changes back to that same host-side store.
+    if(isTauriRuntime ? !webHost : !lanClientReady) return;
     const timeout=window.setTimeout(()=>{
       void apiInvoke('update_web_host_generation_settings',{generationSettings:generationDraft})
-        .catch(e=>setWebHostError(String(e)));
+        .catch(e=>setWebHostError('Could not sync generation settings with the host: '+String(e)));
     },450);
     return ()=>window.clearTimeout(timeout);
-  },[generationDraft,webHost]);
+  },[generationDraft,webHost,lanClientReady]);
 
   useEffect(()=>{
     if(isTauriRuntime || !lanClientReady) return;
@@ -1262,6 +1264,12 @@ function App(){
             maxLoras:current.maxLoras,
             randomLoraMin:current.randomLoraMin,
             randomLoraMax:current.randomLoraMax,
+            constraints:current.constraints,
+            width:current.width,
+            height:current.height,
+            steps:current.steps,
+            cfg:current.cfg,
+            sampler:current.sampler,
           });
           const hostSignature=JSON.stringify({
             plannerSystemPrompt:hostGeneration.plannerSystemPrompt,
@@ -1282,6 +1290,12 @@ function App(){
             maxLoras:hostGeneration.maxLoras,
             randomLoraMin:hostGeneration.randomLoraMin,
             randomLoraMax:hostGeneration.randomLoraMax,
+            constraints:hostGeneration.constraints,
+            width:hostGeneration.width,
+            height:hostGeneration.height,
+            steps:hostGeneration.steps,
+            cfg:hostGeneration.cfg,
+            sampler:hostGeneration.sampler,
           });
           if(currentSignature===hostSignature) return current;
           return {
@@ -1298,11 +1312,17 @@ function App(){
   },[lanClientReady]);
 
   useEffect(()=>{
-    if(tab!=='history' || isTauriRuntime) return;
-    void loadHistory(true);
+    // LAN generations append to the host's persistent history file. Refresh the
+    // desktop view while hosting so remote generations appear without a restart.
+    // On LAN clients, refresh while the History tab is open to show host records.
+    const shouldRefreshHistory=isTauriRuntime
+      ? Boolean(webHost) || tab==='history'
+      : tab==='history';
+    if(!shouldRefreshHistory) return;
+    void loadHistory(tab==='history');
     const interval=window.setInterval(()=>void loadHistory(),2500);
     return ()=>window.clearInterval(interval);
-  },[tab]);
+  },[tab,webHost]);
 
 
   async function rollStack():Promise<string[]|null>{
