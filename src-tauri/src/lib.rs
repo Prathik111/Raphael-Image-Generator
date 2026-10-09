@@ -188,6 +188,12 @@ struct WebApiState {
     cancel_generation: Arc<AtomicBool>,
 }
 
+// Reuse one HTTP connection pool across Registry, LLM and ComfyUI requests.
+fn shared_http_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(reqwest::Client::new)
+}
+
 fn norm(s: &str) -> String { s.trim().to_lowercase().replace([' ', '_', '-', '.', '/'], "") }
 fn base_url(s: &str) -> String { s.trim().trim_end_matches('/').to_string() }
 
@@ -378,7 +384,7 @@ fn registry_executable() -> Result<PathBuf, String> {
 }
 
 async fn registry_health(base_url: &str) -> bool {
-    reqwest::Client::new()
+    shared_http_client().clone()
         .get(format!("{base_url}/health"))
         .timeout(Duration::from_secs(2))
         .send()
@@ -435,7 +441,7 @@ async fn registry_json<T: serde::de::DeserializeOwned>(
     token: &str,
     path: &str,
 ) -> Result<T, String> {
-    let response = reqwest::Client::new()
+    let response = shared_http_client().clone()
         .get(format!("{base_url}{path}"))
         .bearer_auth(token)
         .header("x-raphael-actor", "image-generator")
@@ -794,7 +800,7 @@ async fn scan_library(req: ScanRequest) -> Result<LibrarySnapshot, String> {
 
 #[tauri::command]
 async fn list_provider_models(settings:LlmSettings)->Result<Vec<String>,String>{
-    let client=reqwest::Client::new(); let base=base_url(&settings.base_url);
+    let client=shared_http_client().clone(); let base=base_url(&settings.base_url);
     let (url,need_auth)=if settings.provider=="ollama"{(format!("{}/api/tags",base),false)}else{(if base.ends_with("/v1"){format!("{}/models",base)}else{format!("{}/v1/models",base)},true)};
     let mut request=client.get(url); if need_auth&&!settings.api_key.is_empty(){request=request.bearer_auth(settings.api_key);}
     let response=request.send().await.map_err(|e|e.to_string())?;
@@ -998,7 +1004,7 @@ where F:FnMut(LlmDelta)->Result<(),String> + Send
     if cancel_generation.load(Ordering::SeqCst) {
         return Err("Generation stopped.".into());
     }
-    let client=reqwest::Client::new();
+    let client=shared_http_client().clone();
     let base=base_url(&req.settings.base_url);
     let (url,mut body,ollama)=if req.settings.provider=="ollama"{
         (format!("{}/api/chat",base),json!({
@@ -1431,7 +1437,7 @@ fn inject_prompts(req:InjectRequest)->Result<Value,String>{
 
 async fn interrupt_comfy(comfy_url:&str)->Result<(),String>{
     let base=base_url(comfy_url);
-    let response=reqwest::Client::new()
+    let response=shared_http_client().clone()
         .post(format!("{}/interrupt",base))
         .send().await
         .map_err(|e|e.to_string())?;
@@ -1470,7 +1476,7 @@ async fn submit_to_comfy_inner(
     if cancel_generation.load(Ordering::SeqCst) {
         return Err("Generation stopped.".into());
     }
-    let response=reqwest::Client::new().post(format!("{}/prompt",base_url(&req.comfy_url))).json(&json!({"prompt":req.workflow,"client_id":"raphael-prompt-forge"})).send().await.map_err(|e|e.to_string())?;
+    let response=shared_http_client().clone().post(format!("{}/prompt",base_url(&req.comfy_url))).json(&json!({"prompt":req.workflow,"client_id":"raphael-prompt-forge"})).send().await.map_err(|e|e.to_string())?;
     let status=response.status(); let text=response.text().await.unwrap_or_default();
     if cancel_generation.load(Ordering::SeqCst) {
         let _=interrupt_comfy(&req.comfy_url).await;
@@ -1539,7 +1545,7 @@ where F:FnMut(ComfyProgress)->Result<(),String> + Send
 {
     let base=base_url(&req.comfy_url);
     let ws_url=format!("{}/ws?clientId=raphael-prompt-forge",base.replace("https://","wss://").replace("http://","ws://"));
-    let client=reqwest::Client::new();
+    let client=shared_http_client().clone();
     let mut socket=connect_async(ws_url).await.ok().map(|(stream, _response)| stream);
     let started=Instant::now();
     let mut last_percent=0.0f32;
@@ -1983,7 +1989,19 @@ fn load_history_index_file(path:&Path)->Result<Vec<HistoryRecord>,String>{
         .map_err(|_|"Generation history lock is poisoned.".to_string())?;
     let mut all=read_history_records_file(path)?;
     migrate_history_images(path,&mut all)?;
-    for record in &mut all{hydrate_history_payload(path,&mut record.payload,false);}
+    for record in &mut all{
+        hydrate_history_payload(path,&mut record.payload,false);
+        // The history list only needs identity, timestamp, model summaries and
+        // image availability. Prompts, workflows and settings are fetched when
+        // the user opens a particular record.
+        if let Some(object)=record.payload.as_object_mut(){
+            object.remove("generationSettings");
+            object.remove("workflow");
+            object.remove("positivePrompt");
+            object.remove("negativePrompt");
+            object.remove("rationale");
+        }
+    }
     Ok(all)
 }
 
@@ -1995,7 +2013,9 @@ fn load_history_item_file(path:&Path,id:&str)->Result<Value,String>{
     let Some(record)=all.iter_mut().find(|record|
         record.payload.get("id").and_then(Value::as_str)==Some(id)||record.id==id
     ) else{return Err("Generation history item was not found.".into())};
-    hydrate_history_payload(path,&mut record.payload,true);
+    // Keep image bytes separate from record details so a detail view can
+    // request the image independently and avoid blocking prompt/settings display.
+    hydrate_history_payload(path,&mut record.payload,false);
     Ok(record.payload.clone())
 }
 
@@ -2108,7 +2128,7 @@ async fn path_to_data_url(path: String) -> Result<String, String> {
         }
 
         let (base_url, token) = ensure_registry(None).await?;
-        let response = reqwest::Client::new()
+        let response = shared_http_client().clone()
             .get(format!("{}/api/v1/models/{}/assets/{}/content", base_url, urlencoding::encode(model_id), urlencoding::encode(asset_id)))
             .bearer_auth(token)
             .header("x-raphael-actor", "image-generator")
@@ -2592,7 +2612,15 @@ mod tests {
         let image = "data:image/png;base64,AQID";
         append_history_file(
             &path,
-            json!({"id":"generation-lazy-image-test","imageDataUrl":image,"checkpoint":{"name":"test"}}),
+            json!({
+                "id":"generation-lazy-image-test",
+                "imageDataUrl":image,
+                "checkpoint":{"name":"test"},
+                "positivePrompt":"full positive prompt",
+                "negativePrompt":"full negative prompt",
+                "workflow":{"node":"workflow-payload"},
+                "generationSettings":{"systemPrompt":"large settings payload"}
+            }),
         ).expect("history append should succeed");
 
         let stored = std::fs::read_to_string(&path).expect("read compact history");
@@ -2605,6 +2633,10 @@ mod tests {
         assert_eq!(index.len(), 1);
         assert_eq!(index[0].payload["hasImage"], true);
         assert!(index[0].payload.get("imageDataUrl").is_none());
+        assert!(index[0].payload.get("positivePrompt").is_none());
+        assert!(index[0].payload.get("negativePrompt").is_none());
+        assert!(index[0].payload.get("workflow").is_none());
+        assert!(index[0].payload.get("generationSettings").is_none());
 
         assert_eq!(
             load_history_image_file(&path, "generation-lazy-image-test")
@@ -2613,7 +2645,12 @@ mod tests {
         );
         let item = load_history_item_file(&path, "generation-lazy-image-test")
             .expect("load full history item");
-        assert_eq!(item["imageDataUrl"], image);
+        assert_eq!(item["hasImage"], true);
+        assert!(item.get("imageDataUrl").is_none());
+        assert_eq!(item["positivePrompt"], "full positive prompt");
+        assert_eq!(item["negativePrompt"], "full negative prompt");
+        assert_eq!(item["workflow"]["node"], "workflow-payload");
+        assert_eq!(item["generationSettings"]["systemPrompt"], "large settings payload");
     }
 
     #[test]
