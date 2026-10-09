@@ -926,9 +926,9 @@ function HistoryImageThumbnail({
         return;
       }
       loading=true;
-      void fetchHistoryThumbnailCached(item.id).then(async url=>{
+      void fetchHistoryThumbnailCached(item.id).catch(()=>null).then(async url=>{
         // Fall back to a full image only if a preview cannot be generated or
-        // an older history item has no decodable source.
+        // an older host does not yet expose the thumbnail endpoint.
         const resolved=url || await fetchHistoryImageCached(item.id);
         loading=false;
         if(active && visible) setSrc(resolved);
