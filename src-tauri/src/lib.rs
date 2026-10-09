@@ -2744,6 +2744,50 @@ mod tests {
     }
 
     #[test]
+    fn history_thumbnails_are_small_and_full_images_remain_available() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("generation-history.json");
+        let mut original_png = Vec::new();
+        image::DynamicImage::new_rgb8(1024, 1024)
+            .write_to(
+                &mut std::io::Cursor::new(&mut original_png),
+                image::ImageFormat::Png,
+            )
+            .expect("encode original test image");
+        let original_url = format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(&original_png)
+        );
+
+        append_history_file(
+            &path,
+            json!({"id":"generation-preview-test","imageDataUrl":original_url}),
+        ).expect("save original and its thumbnail");
+
+        let thumbnail_url = load_history_thumbnail_file(&path, "generation-preview-test")
+            .expect("load history thumbnail")
+            .expect("thumbnail should exist");
+        assert!(thumbnail_url.starts_with("data:image/jpeg;base64,"));
+
+        let thumbnail_encoded = thumbnail_url.split_once(',').expect("thumbnail data URL").1;
+        let thumbnail_bytes = base64::engine::general_purpose::STANDARD
+            .decode(thumbnail_encoded)
+            .expect("decode thumbnail data");
+        let thumbnail = image::load_from_memory(&thumbnail_bytes)
+            .expect("decode thumbnail image");
+        assert!(thumbnail.width() <= 256 && thumbnail.height() <= 256);
+        assert!(
+            thumbnail_url.len() < original_url.len(),
+            "thumbnail payload should be smaller than the full-size image"
+        );
+
+        let full_image = load_history_image_file(&path, "generation-preview-test")
+            .expect("load full image")
+            .expect("full image should remain available");
+        assert_eq!(full_image, original_url);
+    }
+
+    #[test]
     fn history_archive_round_trips_image_payload_larger_than_two_mib() {
         let temp = tempfile::tempdir().expect("tempdir");
         let path = temp.path().join("generation-history.json");
