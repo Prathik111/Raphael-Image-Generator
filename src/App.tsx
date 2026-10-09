@@ -2381,6 +2381,9 @@ function App(){
   }
 
   const selectedHistory=selectedHistoryId ? history.find(item=>item.id===selectedHistoryId) : undefined;
+  const latestShowcaseRecord=history.find(item=>item.imageDataUrl || (item.hasImage && historyImageCache.has(item.id)));
+  const latestShowcaseImage=resultImage || latestShowcaseRecord?.imageDataUrl
+    || (latestShowcaseRecord ? historyImageCache.get(latestShowcaseRecord.id) : undefined);
 
   return <div className="app-shell">
     <iframe className="raphael-bg" src="/raphael-background.html" title="Raphael background" aria-hidden="true"/>
@@ -2430,12 +2433,12 @@ function App(){
       </div>
       <div className="image-showcase">
         <div className="showcase-main">
-          {(resultImage || history.find(item=>item.imageDataUrl)?.imageDataUrl || (history.find(item=>item.hasImage && historyImageCache.has(item.id)) ? historyImageCache.get(history.find(item=>item.hasImage && historyImageCache.has(item.id))!.id) : null))
-            ? <img src={resultImage || history.find(item=>item.imageDataUrl)?.imageDataUrl || (history.find(item=>item.hasImage && historyImageCache.has(item.id)) ? historyImageCache.get(history.find(item=>item.hasImage && historyImageCache.has(item.id))!.id) : '') || ''} alt="Latest generated result"/>
+          {latestShowcaseImage
+            ? <img src={latestShowcaseImage} alt="Latest generated result" loading="lazy" decoding="async"/>
             : <div className="showcase-empty"><WandSparkles size={22}/><span>NO GENERATED IMAGE</span></div>}
         </div>
         <div className="showcase-meta">
-          <b>{resultFilename || history.find(item=>item.imageDataUrl)?.checkpoint.name || history.find(item=>item.hasImage)?.checkpoint.name || 'READY FOR GENERATION'}</b>
+          <b>{resultFilename || latestShowcaseRecord?.checkpoint.name || 'READY FOR GENERATION'}</b>
           <span>{comfyStatus==='done' ? 'LATEST GENERATION' : selected?.name || 'SELECT A CHECKPOINT'}</span>
         </div>
         <div className="showcase-strip">
