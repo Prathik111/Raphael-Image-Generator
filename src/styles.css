@@ -242,6 +242,8 @@ button,input,textarea,select{font-size:12px}
 .history-detail-meta{font-size:10px;color:var(--muted)}
 .history-detail-image-wrap{border:1px solid rgba(255,255,255,.16);background:rgba(0,0,0,.36);padding:8px;text-align:center}
 .history-detail-image{display:block;width:100%;max-height:72vh;object-fit:contain;background:#000}
+.history-detail-image-frame{display:block;width:100%;height:auto;min-height:80px}
+.history-detail-image-frame .history-detail-image{height:auto;max-height:72vh;object-fit:contain}
 .history-detail-no-image{min-height:320px;display:grid;place-items:center;gap:8px;color:var(--dim);font-size:10px;letter-spacing:.12em}
 .history-settings-toggle{margin-top:10px}
 .history-settings-card{margin-top:10px;border:1px solid var(--line2);background:rgba(0,0,0,.30);padding:12px}
