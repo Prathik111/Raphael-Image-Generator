@@ -501,6 +501,15 @@ async function withThumbnailConcurrency<T>(task:()=>Promise<T>):Promise<T>{
 
 const historyImageCache=new Map<string,string>();
 const historyImagePending=new Map<string,Promise<string|null>>();
+function rememberHistoryImage(id:string,dataUrl:string):void{
+  historyImageCache.delete(id);
+  historyImageCache.set(id,dataUrl);
+  while(historyImageCache.size>12){
+    const oldest=historyImageCache.keys().next().value;
+    if(oldest===undefined) break;
+    historyImageCache.delete(oldest);
+  }
+}
 async function fetchHistoryImageCached(id:string):Promise<string|null>{
   const cached=historyImageCache.get(id);
   if(cached) return cached;
@@ -509,7 +518,7 @@ async function fetchHistoryImageCached(id:string):Promise<string|null>{
   const request=apiInvoke<string|null>('load_history_image',{id})
     .then(url=>{
       if(typeof url==='string' && url.startsWith('data:image/')){
-        historyImageCache.set(id,url);
+        rememberHistoryImage(id,url);
         return url;
       }
       return null;
@@ -523,8 +532,28 @@ type ThumbnailState = 'loading' | 'ready' | 'error';
 
 const thumbnailCache = new Map<string,string>();
 const thumbnailPending = new Map<string,Promise<string>>();
+const maxThumbnailMemoryEntries=80;
+function cachedThumbnail(reference:string):string|undefined{
+  const value=thumbnailCache.get(reference);
+  if(value){
+    thumbnailCache.delete(reference);
+    thumbnailCache.set(reference,value);
+  }
+  return value;
+}
+function rememberThumbnail(reference:string,dataUrl:string):void{
+  thumbnailCache.delete(reference);
+  thumbnailCache.set(reference,dataUrl);
+  while(thumbnailCache.size>maxThumbnailMemoryEntries){
+    const oldest=thumbnailCache.keys().next().value;
+    if(oldest===undefined) break;
+    thumbnailCache.delete(oldest);
+  }
+}
 const thumbnailDbName='raphael-image-generator-thumbnails';
 const thumbnailStoreName='thumbnails';
+const librarySnapshotStoreName='librarySnapshots';
+const librarySnapshotCacheKey='latest';
 let thumbnailDbPromise:Promise<IDBDatabase|null>|null=null;
 
 function openThumbnailDb():Promise<IDBDatabase|null>{
@@ -532,11 +561,14 @@ function openThumbnailDb():Promise<IDBDatabase|null>{
   if(thumbnailDbPromise) return thumbnailDbPromise;
   thumbnailDbPromise=new Promise(resolve=>{
     try{
-      const request=indexedDB.open(thumbnailDbName,1);
+      const request=indexedDB.open(thumbnailDbName,2);
       request.onupgradeneeded=()=>{
         const db=request.result;
         if(!db.objectStoreNames.contains(thumbnailStoreName)){
           db.createObjectStore(thumbnailStoreName,{keyPath:'key'});
+        }
+        if(!db.objectStoreNames.contains(librarySnapshotStoreName)){
+          db.createObjectStore(librarySnapshotStoreName,{keyPath:'key'});
         }
       };
       request.onsuccess=()=>resolve(request.result);
@@ -547,6 +579,44 @@ function openThumbnailDb():Promise<IDBDatabase|null>{
     }
   });
   return thumbnailDbPromise;
+}
+
+async function readCachedLibrarySnapshot():Promise<LibrarySnapshot|null>{
+  const db=await openThumbnailDb();
+  if(!db) return null;
+  return new Promise(resolve=>{
+    try{
+      const request=db.transaction(librarySnapshotStoreName,'readonly')
+        .objectStore(librarySnapshotStoreName).get(librarySnapshotCacheKey);
+      request.onsuccess=()=>{
+        const snapshot=(request.result as {snapshot?:unknown}|undefined)?.snapshot;
+        if(snapshot && typeof snapshot==='object'){
+          const candidate=snapshot as {checkpoints?:unknown;loras?:unknown};
+          resolve(Array.isArray(candidate.checkpoints) && Array.isArray(candidate.loras)
+            ? snapshot as unknown as LibrarySnapshot
+            : null);
+        }else resolve(null);
+      };
+      request.onerror=()=>resolve(null);
+    }catch{resolve(null);}
+  });
+}
+
+async function persistLibrarySnapshot(snapshot:LibrarySnapshot):Promise<void>{
+  const db=await openThumbnailDb();
+  if(!db) return;
+  await new Promise<void>(resolve=>{
+    try{
+      const request=db.transaction(librarySnapshotStoreName,'readwrite')
+        .objectStore(librarySnapshotStoreName).put({
+          key:librarySnapshotCacheKey,
+          snapshot,
+          savedAt:Date.now(),
+        });
+      request.onsuccess=()=>resolve();
+      request.onerror=()=>resolve();
+    }catch{resolve();}
+  });
 }
 
 async function readPersistedThumbnail(key:string):Promise<string|null>{
@@ -607,7 +677,7 @@ function thumbnailReferences(reference?:string):string[]{
 }
 
 async function fetchModelThumbnailReference(reference:string):Promise<string>{
-  const cached = thumbnailCache.get(reference);
+  const cached = cachedThumbnail(reference);
   if(cached) return cached;
   const pending = thumbnailPending.get(reference);
   if(pending) return pending;
@@ -615,7 +685,7 @@ async function fetchModelThumbnailReference(reference:string):Promise<string>{
   const request = (async()=>{
     const persisted=await readPersistedThumbnail(reference);
     if(persisted){
-      thumbnailCache.set(reference,persisted);
+      rememberThumbnail(reference,persisted);
       return persisted;
     }
     return withThumbnailConcurrency(async()=>{
@@ -626,7 +696,7 @@ async function fetchModelThumbnailReference(reference:string):Promise<string>{
           if(!url || !url.startsWith('data:image/')){
             throw new Error('Registry returned an invalid thumbnail response.');
           }
-          thumbnailCache.set(reference,url);
+          rememberThumbnail(reference,url);
           void persistThumbnail(reference,url);
           return url;
         }catch(error){
@@ -1116,6 +1186,7 @@ function App(){
   const [llm,setLlm]=useState<LlmSettings>(initialLlm);
   const [models,setModels]=useState<string[]>([]);
   const [library,setLibrary]=useState<LibrarySnapshot|null>(null);
+  const libraryLoadedFromNetworkRef=useRef(false);
   const [selectedId,setSelectedId]=useState('');
   const [comfyRoot,setComfyRoot]=useState('D:\\ComfyUI\\models');
   const [registryUrl,setRegistryUrl]=useState('');
@@ -1190,6 +1261,8 @@ function App(){
     maxCharacterLoras:Math.max(1,Math.min(absoluteMaxLoraLimit,persistedGenerationSettings.maxCharacterLoras ?? defaultMaxCharacterLoras)),
   });
   const [selectedHistoryId,setSelectedHistoryId]=useState('');
+  const [selectedHistoryDetails,setSelectedHistoryDetails]=useState<GenerationRecord|null>(null);
+  const [selectedHistoryLoading,setSelectedHistoryLoading]=useState(false);
   const [historySettingsVisible,setHistorySettingsVisible]=useState(false);
   const [checkpointSearch,setCheckpointSearch]=useState('');
   const [loraSearch,setLoraSearch]=useState('');
@@ -1214,6 +1287,7 @@ function App(){
   // the whole archive (which can contain hundreds of MiB of base64 image data).
   const historyRevisionRef=useRef('');
   const historyLoadInFlight=useRef(false);
+  const selectedHistoryRequestRef=useRef('');
   const latestShowcaseImageRequest=useRef('');
 
   const selected=useMemo(
@@ -1282,11 +1356,20 @@ function App(){
   },[allLoras]);
 
   useEffect(()=>{
+    let active=true;
+    void readCachedLibrarySnapshot().then(snapshot=>{
+      if(!active || !snapshot || libraryLoadedFromNetworkRef.current) return;
+      setLibrary(current=>current || snapshot);
+      setSelectedId(current=>current && snapshot.checkpoints.some(model=>model.id===current)
+        ? current
+        : snapshot.checkpoints[0]?.id || '');
+    });
     void loadHistory();
     void discoverRoots();
     if(isTauriRuntime){
       void refreshModels();
     }
+    return ()=>{active=false;};
   },[]);
 
 
@@ -1410,7 +1493,9 @@ function App(){
       const snap=await apiInvoke<LibrarySnapshot>('scan_library',{
         req:{comfyRoot:rootOverride,registryUrl:registryOverride || null},
       });
+      libraryLoadedFromNetworkRef.current=true;
       setLibrary(snap);
+      void persistLibrarySnapshot(snap);
 
       // Keep the selected Registry-file identity when it still exists.
       // When a Manager deletion removes that file, immediately move selection
@@ -2288,10 +2373,13 @@ function App(){
         comfyPromptId:promptId,
       };
       await apiInvoke('append_history',{payload:record});
-      if(generatedImageDataUrl) historyImageCache.set(record.id,generatedImageDataUrl);
+      if(generatedImageDataUrl) rememberHistoryImage(record.id,generatedImageDataUrl);
       historyRevisionRef.current=await apiInvoke<string>('history_revision').catch(()=>historyRevisionRef.current);
       setHistory(x=>[record,...x].slice(0,100));
+      selectedHistoryRequestRef.current=record.id;
       setSelectedHistoryId(record.id);
+      setSelectedHistoryDetails({...record,hasImage:Boolean(record.imageDataUrl)});
+      setSelectedHistoryLoading(false);
       setStage('recorded');
       setStageStatus('recorded','done');
       setToast(generationSucceeded
@@ -2316,21 +2404,41 @@ function App(){
     if(picked.path) setter(picked.path);
   }
 
+  function showHistoryList(){
+    selectedHistoryRequestRef.current='';
+    setSelectedHistoryId('');
+    setSelectedHistoryDetails(null);
+    setSelectedHistoryLoading(false);
+  }
+
   function openHistory(id:string){
+    selectedHistoryRequestRef.current=id;
     setSelectedHistoryId(id);
+    setSelectedHistoryDetails(null);
+    setSelectedHistoryLoading(true);
     setHistorySettingsVisible(false);
     setTab('history');
     setSettingsOpen(false);
-    const item=history.find(record=>record.id===id);
-    if(item?.hasImage && !item.imageDataUrl){
-      void fetchHistoryImageCached(id).then(imageDataUrl=>{
-        if(imageDataUrl){
-          setHistory(current=>current.map(record=>record.id===id
-            ? {...record,imageDataUrl}
-            : record));
-        }
-      }).catch(error=>setError('Could not load saved generation image: '+String(error)));
-    }
+    void apiInvoke<GenerationRecord>('load_history_item',{id})
+      .then(item=>{
+        if(selectedHistoryRequestRef.current!==id) return;
+        const summary=history.find(record=>record.id===id);
+        const fullItem:GenerationRecord={
+          ...item,
+          hasImage:Boolean(item.hasImage || item.imageDataUrl || summary?.hasImage),
+          imageDataUrl:undefined,
+        };
+        setSelectedHistoryDetails(fullItem);
+        setHistory(current=>current.map(record=>record.id===id
+          ? {...record,...fullItem,imageDataUrl:undefined,hasImage:Boolean(record.hasImage || fullItem.hasImage)}
+          : record));
+      })
+      .catch(error=>{
+        if(selectedHistoryRequestRef.current===id) setError('Could not load generation details: '+String(error));
+      })
+      .finally(()=>{
+        if(selectedHistoryRequestRef.current===id) setSelectedHistoryLoading(false);
+      });
   }
 
   function selectCheckpoint(id:string){
@@ -2397,7 +2505,7 @@ function App(){
     }
   }
 
-  const selectedHistory=selectedHistoryId ? history.find(item=>item.id===selectedHistoryId) : undefined;
+  const selectedHistory=selectedHistoryId && selectedHistoryDetails?.id===selectedHistoryId ? selectedHistoryDetails : undefined;
   const latestShowcaseRecord=history.find(item=>item.imageDataUrl || (item.hasImage && historyImageCache.has(item.id)));
   const latestShowcaseImage=resultImage || latestShowcaseRecord?.imageDataUrl
     || (latestShowcaseRecord ? historyImageCache.get(latestShowcaseRecord.id) : undefined);
@@ -2605,14 +2713,16 @@ function App(){
 
       {tab==='history' && <section className="history-panel history-detail-panel">
         <div className="history-mobile-nav">
-          <button className="ghost-btn" onClick={()=>{setTab('generate');setSelectedHistoryId('')}}><WandSparkles size={13}/> GENERATE</button>
+          <button className="ghost-btn" onClick={()=>{setTab('generate');showHistoryList()}}><WandSparkles size={13}/> GENERATE</button>
           <button className="ghost-btn" onClick={()=>void loadHistory(true)}><RefreshCw size={13}/> REFRESH HISTORY</button>
         </div>
-        {!selectedHistory ? (
+        {selectedHistoryId && (selectedHistoryLoading || !selectedHistory) ? (
+          <div className="empty-state"><RefreshCw size={22}/><div><b>LOADING GENERATION</b><span>Reading this record's prompts and settings. Its image loads separately.</span></div></div>
+        ) : !selectedHistory ? (
           <div className="empty-state"><History size={22}/><div><b>NO GENERATIONS</b><span>Completed generations will appear here.</span></div></div>
         ) : <>
           <div className="history-detail-head">
-            <button className="ghost-btn" onClick={()=>setSelectedHistoryId('')}>ALL HISTORY</button>
+            <button className="ghost-btn" onClick={showHistoryList}>ALL HISTORY</button>
             <div className="history-detail-meta">{new Date(selectedHistory.timestamp).toLocaleString()}</div>
           </div>
 
