@@ -2345,4 +2345,64 @@ mod tests {
         assert!(!finalized.positive_prompt.contains("char_tag"));
         assert_eq!(finalized.negative_prompt, "blurry");
     }
+
+    #[test]
+    fn history_archive_round_trips_image_payload_larger_than_two_mib() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("generation-history.json");
+        let image = format!("data:image/png;base64,{}", "A".repeat(3 * 1024 * 1024));
+
+        append_history_file(&path, json!({"imageDataUrl": image}))
+            .expect("large image history should be persisted");
+        let records = load_history_file(&path).expect("history should be readable");
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].payload["imageDataUrl"].as_str().map(str::len),
+            Some("data:image/png;base64,".len() + 3 * 1024 * 1024)
+        );
+    }
+
+    #[test]
+    fn concurrent_history_appends_do_not_overwrite_each_other() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("generation-history.json");
+
+        std::thread::scope(|scope| {
+            for worker in 0..8 {
+                let path = &path;
+                scope.spawn(move || {
+                    for item in 0..10 {
+                        append_history_file(path, json!({"worker":worker,"item":item}))
+                            .expect("history append should succeed");
+                    }
+                });
+            }
+        });
+
+        let records = load_history_file(&path).expect("history should be readable");
+        assert_eq!(records.len(), 80, "every concurrent append must be retained");
+        let unique: std::collections::HashSet<String> = records
+            .iter()
+            .map(|record| format!("{}:{}", record.payload["worker"], record.payload["item"]))
+            .collect();
+        assert_eq!(unique.len(), 80, "no appended record should be duplicated");
+    }
+
+    #[test]
+    fn malformed_history_is_not_silently_overwritten() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("generation-history.json");
+        std::fs::write(&path, b"{ invalid json").expect("write malformed fixture");
+
+        let result = append_history_file(&path, json!({"shouldNotReplaceArchive":true}));
+
+        assert!(result.is_err(), "malformed history must return an error");
+        assert_eq!(
+            std::fs::read(&path).expect("history file must remain"),
+            b"{ invalid json",
+            "malformed history must be preserved for recovery"
+        );
+    }
+
 }
