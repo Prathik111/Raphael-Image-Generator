@@ -982,6 +982,10 @@ function App(){
   const streamText=useRef('');
   // Protect in-progress LAN edits from an older host-settings poll response.
   const generationSettingsEditedAt=useRef(0);
+  // Poll the tiny history revision marker; do not repeatedly transfer and parse
+  // the whole archive (which can contain hundreds of MiB of base64 image data).
+  const historyRevisionRef=useRef('');
+  const historyLoadInFlight=useRef(false);
 
   const selected=useMemo(
     ()=>library?.checkpoints.find(x=>x.id===selectedId) || library?.checkpoints[0],
@@ -1113,12 +1117,23 @@ function App(){
   }
 
   async function loadHistory(showError=false){
+    if(historyLoadInFlight.current) return;
+    historyLoadInFlight.current=true;
     try{
+      // The history contains inline base64 images, so fetching it every polling
+      // interval repeatedly moves/parses a potentially very large JSON document.
+      // A tiny file revision tells us whether a full read is actually required.
+      const revision=await apiInvoke<string>('history_revision');
+      if(revision===historyRevisionRef.current) return;
+
       const records=await apiInvoke<Array<{payload:GenerationRecord}>>('load_history');
       if(!Array.isArray(records)) throw new Error('History response was not a list.');
       setHistory(records.map(x=>x.payload).filter(Boolean));
+      historyRevisionRef.current=revision;
     }catch(e){
       if(showError) setError('Could not load host generation history: '+String(e));
+    }finally{
+      historyLoadInFlight.current=false;
     }
   }
 
