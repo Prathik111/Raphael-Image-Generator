@@ -1975,7 +1975,7 @@ fn migrate_history_images(path:&Path,records:&mut [HistoryRecord])->Result<bool,
     for record in records.iter_mut(){
         if record.payload.get("_historyImageFile").and_then(Value::as_str).is_some(){continue;}
         let Some(data_url)=record.payload.get("imageDataUrl").and_then(Value::as_str).map(str::to_string) else{continue};
-        if let Some(filename)=store_history_image(path,&data_url,false)?{
+        if let Some(filename)=store_history_image(path,&data_url,true)?{
             if let Some(object)=record.payload.as_object_mut(){
                 object.remove("imageDataUrl");
                 object.insert("_historyImageFile".into(),Value::String(filename));
@@ -1998,6 +1998,23 @@ fn history_image_data_url(path:&Path,filename:&str)->Option<String>{
         _=>"image/png",
     };
     Some(format!("data:{};base64,{}",mime,base64::engine::general_purpose::STANDARD.encode(bytes)))
+}
+
+fn history_thumbnail_inline_data_url(path:&Path,id:&str,data_url:&str)->Option<String>{
+    if Path::new(id).file_name().and_then(|x|x.to_str())!=Some(id){return None;}
+    let safe_id:String=id.chars()
+        .filter(|character|character.is_ascii_alphanumeric()||*character=='-'||*character=='_')
+        .take(80)
+        .collect();
+    if safe_id.is_empty(){return None;}
+    let (header,encoded)=data_url.split_once(',')?;
+    if !header.starts_with("data:")||!header.contains(";base64"){return None;}
+    let bytes=base64::engine::general_purpose::STANDARD.decode(encoded).ok()?;
+    let synthetic_filename=format!("legacy-{safe_id}.png");
+    // Create old-entry previews only when the UI scrolls close to a card.
+    let _=store_history_thumbnail(path,&synthetic_filename,&bytes);
+    let preview=fs::read(history_thumbnails_dir(path).join(format!("legacy-{safe_id}.jpg"))).ok()?;
+    Some(format!("data:image/jpeg;base64,{}",base64::engine::general_purpose::STANDARD.encode(preview)))
 }
 
 fn history_thumbnail_data_url(path:&Path,filename:&str)->Option<String>{
@@ -2053,8 +2070,7 @@ fn load_history_file(path:&Path)->Result<Vec<HistoryRecord>,String>{
 fn load_history_index_file(path:&Path)->Result<Vec<HistoryRecord>,String>{
     let _guard=HISTORY_FILE_LOCK.lock()
         .map_err(|_|"Generation history lock is poisoned.".to_string())?;
-    let mut all=read_history_records_file(path)?;
-    migrate_history_images(path,&mut all)?;
+    let all=read_history_records_file(path)?;
     for record in &mut all{
         hydrate_history_payload(path,&mut record.payload,false);
         // The history list only needs identity, timestamp, model summaries and
@@ -2074,8 +2090,7 @@ fn load_history_index_file(path:&Path)->Result<Vec<HistoryRecord>,String>{
 fn load_history_item_file(path:&Path,id:&str)->Result<Value,String>{
     let _guard=HISTORY_FILE_LOCK.lock()
         .map_err(|_|"Generation history lock is poisoned.".to_string())?;
-    let mut all=read_history_records_file(path)?;
-    migrate_history_images(path,&mut all)?;
+    let all=read_history_records_file(path)?;
     let Some(record)=all.iter_mut().find(|record|
         record.payload.get("id").and_then(Value::as_str)==Some(id)||record.id==id
     ) else{return Err("Generation history item was not found.".into())};
@@ -2088,8 +2103,7 @@ fn load_history_item_file(path:&Path,id:&str)->Result<Value,String>{
 fn load_history_image_file(path:&Path,id:&str)->Result<Option<String>,String>{
     let _guard=HISTORY_FILE_LOCK.lock()
         .map_err(|_|"Generation history lock is poisoned.".to_string())?;
-    let mut all=read_history_records_file(path)?;
-    migrate_history_images(path,&mut all)?;
+    let all=read_history_records_file(path)?;
     let Some(record)=all.iter().find(|record|
         record.payload.get("id").and_then(Value::as_str)==Some(id)||record.id==id
     ) else{return Ok(None)};
@@ -2104,14 +2118,18 @@ fn load_history_image_file(path:&Path,id:&str)->Result<Option<String>,String>{
 fn load_history_thumbnail_file(path:&Path,id:&str)->Result<Option<String>,String>{
     let _guard=HISTORY_FILE_LOCK.lock()
         .map_err(|_|"Generation history lock is poisoned.".to_string())?;
-    let mut all=read_history_records_file(path)?;
-    migrate_history_images(path,&mut all)?;
+    let all=read_history_records_file(path)?;
     let Some(record)=all.iter().find(|record|
         record.payload.get("id").and_then(Value::as_str)==Some(id)||record.id==id
     ) else{return Ok(None)};
-    Ok(record.payload.get("_historyImageFile").and_then(Value::as_str)
-        .and_then(|filename|history_thumbnail_data_url(path,filename)))
+    if let Some(filename)=record.payload.get("_historyImageFile").and_then(Value::as_str){
+        return Ok(history_thumbnail_data_url(path,filename));
+    }
+    let payload_id=record.payload.get("id").and_then(Value::as_str).unwrap_or(record.id.as_str());
+    Ok(record.payload.get("imageDataUrl").and_then(Value::as_str)
+        .and_then(|data_url|history_thumbnail_inline_data_url(path,payload_id,data_url)))
 }
+
 
 fn append_history_file(path:&Path,payload:Value)->Result<HistoryRecord,String>{
     let _guard=HISTORY_FILE_LOCK.lock()
