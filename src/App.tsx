@@ -729,13 +729,8 @@ function ModelThumbnail({model,iconSize=18}:{model:LibrarySnapshot['checkpoints'
   const frameRef = useRef<HTMLSpanElement|null>(null);
   const references = useMemo(()=>thumbnailReferences(model.thumbnail),[model.thumbnail]);
   const referenceKey = references.join('|');
-  const cachedReference = references.find(reference=>thumbnailCache.has(reference));
-  const [state,setState] = useState<ThumbnailState>(
-    cachedReference ? 'ready' : 'loading',
-  );
-  const [src,setSrc] = useState<string|null>(
-    cachedReference ? thumbnailCache.get(cachedReference) || null : null,
-  );
+  const [state,setState] = useState<ThumbnailState>('loading');
+  const [src,setSrc] = useState<string|null>(null);
 
   useEffect(()=>{
     if(!references.length){
@@ -744,37 +739,47 @@ function ModelThumbnail({model,iconSize=18}:{model:LibrarySnapshot['checkpoints'
       return;
     }
 
-    const cached=references.find(reference=>thumbnailCache.has(reference));
-    if(cached){
-      setSrc(thumbnailCache.get(cached) || null);
-      setState('ready');
-      return;
-    }
-
     let active=true;
+    let visible=false;
     let observer:IntersectionObserver|undefined;
     const load=()=>{
+      if(!visible) return;
+      const cached=references.map(reference=>cachedThumbnail(reference)).find(Boolean);
+      if(cached){
+        setSrc(cached);
+        setState('ready');
+        return;
+      }
       void fetchModelThumbnail(references)
         .then(url=>{
-          if(!active) return;
+          // Cache the response even if this item scrolled away while the
+          // request was running; only keep the image URL in component state
+          // while the item is near the viewport.
+          if(!active || !visible) return;
           setSrc(url);
           setState('ready');
         })
         .catch(()=>{
-          if(!active) return;
+          if(!active || !visible) return;
           setSrc(null);
           setState('error');
         });
     };
 
     if(typeof IntersectionObserver==='undefined' || !frameRef.current){
+      visible=true;
       load();
     }else{
       observer=new IntersectionObserver(entries=>{
-        if(!entries[0]?.isIntersecting) return;
-        observer?.disconnect();
-        load();
-      },{rootMargin:'360px'});
+        if(!active) return;
+        visible=entries.some(entry=>entry.isIntersecting);
+        if(visible){
+          load();
+        }else{
+          setSrc(null);
+          setState('loading');
+        }
+      },{rootMargin:'160px'});
       observer.observe(frameRef.current);
     }
 
@@ -824,27 +829,44 @@ function HistoryImageThumbnail({
   const frameRef=useRef<HTMLSpanElement|null>(null);
   const [src,setSrc]=useState<string|null>(item.imageDataUrl || historyImageCache.get(item.id) || null);
   useEffect(()=>{
-    if(item.imageDataUrl){setSrc(item.imageDataUrl);return;}
-    const cached=historyImageCache.get(item.id);
-    if(cached){setSrc(cached);return;}
-    if(!item.hasImage){setSrc(null);return;}
+    if(!item.hasImage && !item.imageDataUrl){
+      setSrc(null);
+      return;
+    }
     let active=true;
+    let visible=eager;
+    let loading=false;
     let observer:IntersectionObserver|undefined;
-    let requested=false;
     const load=()=>{
-      if(requested) return;
-      requested=true;
+      if(!active || !visible || loading) return;
+      const cached=item.imageDataUrl || historyImageCache.get(item.id);
+      if(cached){
+        setSrc(cached);
+        return;
+      }
+      loading=true;
       void fetchHistoryImageCached(item.id).then(url=>{
-        if(active) setSrc(url);
-      }).catch(()=>{if(active)setSrc(null);});
+        loading=false;
+        if(active && visible) setSrc(url);
+      }).catch(()=>{
+        loading=false;
+        if(active && visible) setSrc(null);
+      });
     };
     if(eager || typeof IntersectionObserver==='undefined' || !frameRef.current){
+      visible=true;
       load();
     }else{
       observer=new IntersectionObserver(entries=>{
-        if(!entries.some(entry=>entry.isIntersecting)) return;
-        observer?.disconnect();
-        load();
+        if(!active) return;
+        visible=entries.some(entry=>entry.isIntersecting);
+        if(visible){
+          load();
+        }else{
+          // Generated images are large data URLs; release this component's
+          // reference when scrolled away. The shared LRU keeps a small hot set.
+          setSrc(null);
+        }
       },{rootMargin:'180px'});
       observer.observe(frameRef.current);
     }
@@ -1454,13 +1476,9 @@ function App(){
       if(newestWithImage && latestShowcaseImageRequest.current!==newestWithImage.id){
         latestShowcaseImageRequest.current=newestWithImage.id;
         void fetchHistoryImageCached(newestWithImage.id).then(imageDataUrl=>{
-          if(imageDataUrl){
-            setHistory(current=>current.map(item=>item.id===newestWithImage.id
-              ? {...item,imageDataUrl}
-              : item));
-          }else{
-            latestShowcaseImageRequest.current='';
-          }
+          if(!imageDataUrl) latestShowcaseImageRequest.current='';
+          // fetchHistoryImageCached stores the URL in the bounded LRU; don't
+          // copy a multi-megabyte data URL into the entire history state.
         }).catch(()=>{latestShowcaseImageRequest.current='';});
       }
     }catch(e){
@@ -2375,10 +2393,15 @@ function App(){
       await apiInvoke('append_history',{payload:record});
       if(generatedImageDataUrl) rememberHistoryImage(record.id,generatedImageDataUrl);
       historyRevisionRef.current=await apiInvoke<string>('history_revision').catch(()=>historyRevisionRef.current);
-      setHistory(x=>[record,...x].slice(0,100));
+      const historySummary:GenerationRecord={
+        ...record,
+        imageDataUrl:undefined,
+        hasImage:Boolean(record.imageDataUrl),
+      };
+      setHistory(x=>[historySummary,...x].slice(0,100));
       selectedHistoryRequestRef.current=record.id;
       setSelectedHistoryId(record.id);
-      setSelectedHistoryDetails({...record,hasImage:Boolean(record.imageDataUrl)});
+      setSelectedHistoryDetails({...record,imageDataUrl:undefined,hasImage:Boolean(record.imageDataUrl)});
       setSelectedHistoryLoading(false);
       setStage('recorded');
       setStageStatus('recorded','done');
