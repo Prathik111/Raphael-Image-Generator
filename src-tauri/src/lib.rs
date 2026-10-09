@@ -1983,7 +1983,19 @@ fn load_history_index_file(path:&Path)->Result<Vec<HistoryRecord>,String>{
         .map_err(|_|"Generation history lock is poisoned.".to_string())?;
     let mut all=read_history_records_file(path)?;
     migrate_history_images(path,&mut all)?;
-    for record in &mut all{hydrate_history_payload(path,&mut record.payload,false);}
+    for record in &mut all{
+        hydrate_history_payload(path,&mut record.payload,false);
+        // The history list only needs identity, timestamp, model summaries and
+        // image availability. Prompts, large workflows and settings are fetched
+        // only after the user opens a particular record.
+        if let Some(object)=record.payload.as_object_mut(){
+            object.remove("generationSettings");
+            object.remove("workflow");
+            object.remove("positivePrompt");
+            object.remove("negativePrompt");
+            object.remove("rationale");
+        }
+    }
     Ok(all)
 }
 
@@ -1995,7 +2007,9 @@ fn load_history_item_file(path:&Path,id:&str)->Result<Value,String>{
     let Some(record)=all.iter_mut().find(|record|
         record.payload.get("id").and_then(Value::as_str)==Some(id)||record.id==id
     ) else{return Err("Generation history item was not found.".into())};
-    hydrate_history_payload(path,&mut record.payload,true);
+    // Full record metadata is loaded separately from image bytes. The UI
+    // requests the image only when the detail view needs to display it.
+    hydrate_history_payload(path,&mut record.payload,false);
     Ok(record.payload.clone())
 }
 
