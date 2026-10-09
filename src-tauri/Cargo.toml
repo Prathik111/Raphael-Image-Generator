@@ -25,6 +25,7 @@ futures-util = "0.3"
 rand = "0.9"
 rfd = "0.15"
 base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
 directories = "6"
 url = "2"
 urlencoding = "2"
