@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
 use axum::{
-    extract::{Json as AxumJson, Path as AxumPath, State as AxumState},
+    extract::{DefaultBodyLimit, Json as AxumJson, Path as AxumPath, State as AxumState},
     http::StatusCode,
     response::{
         sse::{Event, KeepAlive, Sse},
@@ -1936,6 +1936,10 @@ async fn start_web_host(
         }))
         .route("/api/{command}",post(web_command))
         .fallback_service(ServeDir::new(dist))
+        // Generation history includes base64-encoded images. Axum's default
+        // JSON body limit (2 MiB) rejects many real outputs before they can be
+        // persisted on the host. Keep a finite, LAN-friendly upper bound.
+        .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
         .with_state(api_state);
     let lan=format!("http://{}:{}",lan_host,actual_port);
     let task=tokio::spawn(async move{
