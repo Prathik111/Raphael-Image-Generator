@@ -1572,26 +1572,29 @@ function App(){
         latestShowcaseImageRequest.current='';
         setHistoryShowcaseImage(null);
       }else{
-        const cachedPreview=historyThumbnailCache.get(newestWithImage.id);
-        if(cachedPreview){
-          setHistoryShowcaseImage({id:newestWithImage.id,src:cachedPreview});
-          latestShowcaseImageRequest.current=newestWithImage.id;
-        }else if(latestShowcaseImageRequest.current!==newestWithImage.id){
-          latestShowcaseImageRequest.current=newestWithImage.id;
-          void fetchHistoryThumbnailCached(newestWithImage.id).then(previewUrl=>{
-            if(latestShowcaseImageRequest.current!==newestWithImage.id) return;
-            if(previewUrl){
-              setHistoryShowcaseImage({id:newestWithImage.id,src:previewUrl});
-            }else{
+        const id=newestWithImage.id;
+        const cachedFull=historyImageCache.get(id);
+        const cachedPreview=historyThumbnailCache.get(id);
+        latestShowcaseImageRequest.current=id;
+        if(cachedFull){
+          setHistoryShowcaseImage({id,src:cachedFull});
+        }else{
+          if(cachedPreview) setHistoryShowcaseImage({id,src:cachedPreview});
+          // Show a small preview as soon as possible, then replace it with the
+          // original image for the large showcase. Keep the history cards on previews.
+          void (async()=>{
+            let preview=cachedPreview || await fetchHistoryThumbnailCached(id).catch(()=>null);
+            if(latestShowcaseImageRequest.current!==id) return;
+            if(preview) setHistoryShowcaseImage({id,src:preview});
+            const full=historyImageCache.get(id) || await fetchHistoryImageCached(id).catch(()=>null);
+            if(latestShowcaseImageRequest.current!==id) return;
+            if(full){
+              setHistoryShowcaseImage({id,src:full});
+            }else if(!preview){
               latestShowcaseImageRequest.current='';
               setHistoryShowcaseImage(null);
             }
-          }).catch(()=>{
-            if(latestShowcaseImageRequest.current===newestWithImage.id){
-              latestShowcaseImageRequest.current='';
-              setHistoryShowcaseImage(null);
-            }
-          });
+          })();
         }
       }
     }catch(e){
@@ -2506,11 +2509,10 @@ function App(){
       await apiInvoke('append_history',{payload:record});
       if(generatedImageDataUrl){
         rememberHistoryImage(record.id,generatedImageDataUrl);
-        // Once the host has persisted the generation and its compact preview,
-        // update the showcase without waiting for the periodic history poll.
-        void fetchHistoryThumbnailCached(record.id).then(preview=>{
-          if(preview) setHistoryShowcaseImage({id:record.id,src:preview});
-        }).catch(()=>{});
+        setHistoryShowcaseImage({id:record.id,src:generatedImageDataUrl});
+        // Prewarm the compact cache for the next visit without replacing the
+        // full-resolution image in the large showcase with a tiny preview.
+        void fetchHistoryThumbnailCached(record.id).catch(()=>null);
       }
       historyRevisionRef.current=await apiInvoke<string>('history_revision').catch(()=>historyRevisionRef.current);
       const historySummary:GenerationRecord={
