@@ -595,6 +595,8 @@ const thumbnailDbName='raphael-image-generator-thumbnails';
 const thumbnailStoreName='thumbnails';
 const librarySnapshotStoreName='librarySnapshots';
 const librarySnapshotCacheKey='latest';
+const historySnapshotStoreName='historySnapshots';
+const historySnapshotCacheKey='latest';
 let thumbnailDbPromise:Promise<IDBDatabase|null>|null=null;
 let thumbnailWritesSincePrune=0;
 
@@ -603,7 +605,7 @@ function openThumbnailDb():Promise<IDBDatabase|null>{
   if(thumbnailDbPromise) return thumbnailDbPromise;
   thumbnailDbPromise=new Promise(resolve=>{
     try{
-      const request=indexedDB.open(thumbnailDbName,2);
+      const request=indexedDB.open(thumbnailDbName,3);
       request.onupgradeneeded=()=>{
         const db=request.result;
         if(!db.objectStoreNames.contains(thumbnailStoreName)){
@@ -611,6 +613,9 @@ function openThumbnailDb():Promise<IDBDatabase|null>{
         }
         if(!db.objectStoreNames.contains(librarySnapshotStoreName)){
           db.createObjectStore(librarySnapshotStoreName,{keyPath:'key'});
+        }
+        if(!db.objectStoreNames.contains(historySnapshotStoreName)){
+          db.createObjectStore(historySnapshotStoreName,{keyPath:'key'});
         }
       };
       request.onsuccess=()=>resolve(request.result);
@@ -653,6 +658,51 @@ async function persistLibrarySnapshot(snapshot:LibrarySnapshot):Promise<void>{
         .objectStore(librarySnapshotStoreName).put({
           key:librarySnapshotCacheKey,
           snapshot,
+          savedAt:Date.now(),
+        });
+      request.onsuccess=()=>resolve();
+      request.onerror=()=>resolve();
+    }catch{resolve();}
+  });
+}
+
+async function readCachedHistorySnapshot():Promise<GenerationRecord[]|null>{
+  const db=await openThumbnailDb();
+  if(!db) return null;
+  return new Promise(resolve=>{
+    try{
+      const request=db.transaction(historySnapshotStoreName,'readonly')
+        .objectStore(historySnapshotStoreName).get(historySnapshotCacheKey);
+      request.onsuccess=()=>{
+        const items=(request.result as {items?:unknown}|undefined)?.items;
+        if(Array.isArray(items) && items.every(item=>
+          item && typeof item==='object'
+          && typeof (item as GenerationRecord).id==='string'
+          && typeof (item as GenerationRecord).timestamp==='string'
+          && Boolean((item as GenerationRecord).checkpoint)
+          && Array.isArray((item as GenerationRecord).loras)
+        )){
+          resolve(items as GenerationRecord[]);
+        }else resolve(null);
+      };
+      request.onerror=()=>resolve(null);
+    }catch{resolve(null);}
+  });
+}
+
+async function persistHistorySnapshot(items:GenerationRecord[]):Promise<void>{
+  const db=await openThumbnailDb();
+  if(!db) return;
+  const compactItems=items.slice(0,100).map(item=>{
+    const {imageDataUrl,...metadata}=item;
+    return {...metadata,hasImage:Boolean(item.hasImage || imageDataUrl)};
+  });
+  await new Promise<void>(resolve=>{
+    try{
+      const request=db.transaction(historySnapshotStoreName,'readwrite')
+        .objectStore(historySnapshotStoreName).put({
+          key:historySnapshotCacheKey,
+          items:compactItems,
           savedAt:Date.now(),
         });
       request.onsuccess=()=>resolve();
@@ -1392,6 +1442,7 @@ function App(){
   // the whole archive (which can contain hundreds of MiB of base64 image data).
   const historyRevisionRef=useRef('');
   const historyLoadInFlight=useRef(false);
+  const historyLoadedFromNetworkRef=useRef(false);
   const selectedHistoryRequestRef=useRef('');
   const latestShowcaseImageRequest=useRef('');
 
@@ -1469,6 +1520,10 @@ function App(){
         ? current
         : snapshot.checkpoints[0]?.id || '');
     });
+    void readCachedHistorySnapshot().then(items=>{
+      if(!active || !items || historyLoadedFromNetworkRef.current) return;
+      setHistory(current=>current.length ? current : items);
+    });
     void loadHistory();
     void discoverRoots();
     if(isTauriRuntime){
@@ -1476,6 +1531,14 @@ function App(){
     }
     return ()=>{active=false;};
   },[]);
+
+  useEffect(()=>{
+    // This cache paints the previous lightweight list while the host refreshes.
+    // It deliberately excludes image data URLs; thumbnails are cached separately.
+    if(historyLoadedFromNetworkRef.current){
+      void persistHistorySnapshot(history);
+    }
+  },[history]);
 
 
   const setStageStatus=(key:Stage,value:Status)=>{
@@ -1562,6 +1625,7 @@ function App(){
         hasImage:Boolean(x.payload?.hasImage || x.payload?.imageDataUrl),
         imageDataUrl:undefined,
       })).filter(item=>Boolean(item.id));
+      historyLoadedFromNetworkRef.current=true;
       setHistory(items);
       historyRevisionRef.current=revision;
 
@@ -2520,6 +2584,7 @@ function App(){
         imageDataUrl:undefined,
         hasImage:Boolean(record.imageDataUrl),
       };
+      historyLoadedFromNetworkRef.current=true;
       setHistory(x=>[historySummary,...x].slice(0,100));
       selectedHistoryRequestRef.current=record.id;
       setSelectedHistoryId(record.id);
@@ -2574,9 +2639,6 @@ function App(){
           imageDataUrl:undefined,
         };
         setSelectedHistoryDetails(fullItem);
-        setHistory(current=>current.map(record=>record.id===id
-          ? {...record,...fullItem,imageDataUrl:undefined,hasImage:Boolean(record.hasImage || fullItem.hasImage)}
-          : record));
       })
       .catch(error=>{
         if(selectedHistoryRequestRef.current===id) setError('Could not load generation details: '+String(error));
