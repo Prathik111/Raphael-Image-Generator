@@ -525,6 +525,8 @@ const thumbnailCache = new Map<string,string>();
 const thumbnailPending = new Map<string,Promise<string>>();
 const thumbnailDbName='raphael-image-generator-thumbnails';
 const thumbnailStoreName='thumbnails';
+const librarySnapshotStoreName='librarySnapshots';
+const librarySnapshotCacheKey='latest';
 let thumbnailDbPromise:Promise<IDBDatabase|null>|null=null;
 
 function openThumbnailDb():Promise<IDBDatabase|null>{
@@ -532,11 +534,14 @@ function openThumbnailDb():Promise<IDBDatabase|null>{
   if(thumbnailDbPromise) return thumbnailDbPromise;
   thumbnailDbPromise=new Promise(resolve=>{
     try{
-      const request=indexedDB.open(thumbnailDbName,1);
+      const request=indexedDB.open(thumbnailDbName,2);
       request.onupgradeneeded=()=>{
         const db=request.result;
         if(!db.objectStoreNames.contains(thumbnailStoreName)){
           db.createObjectStore(thumbnailStoreName,{keyPath:'key'});
+        }
+        if(!db.objectStoreNames.contains(librarySnapshotStoreName)){
+          db.createObjectStore(librarySnapshotStoreName,{keyPath:'key'});
         }
       };
       request.onsuccess=()=>resolve(request.result);
@@ -547,6 +552,43 @@ function openThumbnailDb():Promise<IDBDatabase|null>{
     }
   });
   return thumbnailDbPromise;
+}
+
+async function readCachedLibrarySnapshot():Promise<LibrarySnapshot|null>{
+  const db=await openThumbnailDb();
+  if(!db) return null;
+  return new Promise(resolve=>{
+    try{
+      const request=db.transaction(librarySnapshotStoreName,'readonly')
+        .objectStore(librarySnapshotStoreName).get(librarySnapshotCacheKey);
+      request.onsuccess=()=>{
+        const snapshot=(request.result as {snapshot?:unknown}|undefined)?.snapshot;
+        if(snapshot && typeof snapshot==='object'
+          && Array.isArray((snapshot as LibrarySnapshot).checkpoints)
+          && Array.isArray((snapshot as LibrarySnapshot).loras)){
+          resolve(snapshot as LibrarySnapshot);
+        }else resolve(null);
+      };
+      request.onerror=()=>resolve(null);
+    }catch{resolve(null);}
+  });
+}
+
+async function persistLibrarySnapshot(snapshot:LibrarySnapshot):Promise<void>{
+  const db=await openThumbnailDb();
+  if(!db) return;
+  await new Promise<void>(resolve=>{
+    try{
+      const request=db.transaction(librarySnapshotStoreName,'readwrite')
+        .objectStore(librarySnapshotStoreName).put({
+          key:librarySnapshotCacheKey,
+          snapshot,
+          savedAt:Date.now(),
+        });
+      request.onsuccess=()=>resolve();
+      request.onerror=()=>resolve();
+    }catch{resolve();}
+  });
 }
 
 async function readPersistedThumbnail(key:string):Promise<string|null>{
@@ -1116,6 +1158,7 @@ function App(){
   const [llm,setLlm]=useState<LlmSettings>(initialLlm);
   const [models,setModels]=useState<string[]>([]);
   const [library,setLibrary]=useState<LibrarySnapshot|null>(null);
+  const libraryLoadedFromNetworkRef=useRef(false);
   const [selectedId,setSelectedId]=useState('');
   const [comfyRoot,setComfyRoot]=useState('D:\\ComfyUI\\models');
   const [registryUrl,setRegistryUrl]=useState('');
@@ -1282,11 +1325,22 @@ function App(){
   },[allLoras]);
 
   useEffect(()=>{
+    // Show the last-known Registry inventory immediately, while the authoritative
+    // host scan refreshes it in parallel. The live result always wins.
+    let active=true;
+    void readCachedLibrarySnapshot().then(snapshot=>{
+      if(!active || !snapshot || libraryLoadedFromNetworkRef.current) return;
+      setLibrary(current=>current || snapshot);
+      setSelectedId(current=>current && snapshot.checkpoints.some(model=>model.id===current)
+        ? current
+        : snapshot.checkpoints[0]?.id || '');
+    });
     void loadHistory();
     void discoverRoots();
     if(isTauriRuntime){
       void refreshModels();
     }
+    return ()=>{active=false;};
   },[]);
 
 
@@ -1410,7 +1464,9 @@ function App(){
       const snap=await apiInvoke<LibrarySnapshot>('scan_library',{
         req:{comfyRoot:rootOverride,registryUrl:registryOverride || null},
       });
+      libraryLoadedFromNetworkRef.current=true;
       setLibrary(snap);
+      void persistLibrarySnapshot(snap);
 
       // Keep the selected Registry-file identity when it still exists.
       // When a Manager deletion removes that file, immediately move selection
