@@ -1743,6 +1743,7 @@ async fn web_command(
             let request=serde_json::from_value::<InjectRequest>(req_value).map_err(|e|e.to_string())?;
             serde_json::to_value(inject_prompts(request)?).map_err(|e|e.to_string())
         }
+        "history_revision"=>serde_json::to_value(history_revision(state.app.clone())?).map_err(|e|e.to_string()),
         "load_history"=>serde_json::to_value(load_history(state.app.clone())?).map_err(|e|e.to_string()),
         "append_history"=>{
             let payload=body.get("payload").cloned().unwrap_or(Value::Null);
@@ -1841,6 +1842,19 @@ fn history_path(app:&AppHandle)->Result<PathBuf,String>{
     Ok(dir.join("generation-history.json"))
 }
 
+fn history_revision_file(path:&Path)->Result<String,String>{
+    let _guard=HISTORY_FILE_LOCK.lock()
+        .map_err(|_|"Generation history lock is poisoned.".to_string())?;
+    if !path.exists(){return Ok("missing".into());}
+    let metadata=fs::metadata(path).map_err(|e|e.to_string())?;
+    let modified=metadata.modified()
+        .map_err(|e|e.to_string())?
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    Ok(format!("{}:{}",metadata.len(),modified))
+}
+
 fn load_history_file(path:&Path)->Result<Vec<HistoryRecord>,String>{
     let _guard=HISTORY_FILE_LOCK.lock()
         .map_err(|_|"Generation history lock is poisoned.".to_string())?;
@@ -1869,6 +1883,12 @@ fn append_history_file(path:&Path,payload:Value)->Result<HistoryRecord,String>{
         return Err(format!("Could not replace generation history file: {error}"));
     }
     Ok(rec)
+}
+
+#[tauri::command]
+fn history_revision(app:AppHandle)->Result<String,String>{
+    let path=history_path(&app)?;
+    history_revision_file(&path)
 }
 
 #[tauri::command]
@@ -2053,7 +2073,7 @@ pub fn run(){
         .invoke_handler(tauri::generate_handler![
             pick_folder,discover_raphael_config,discover_raphael_roots,scan_library,list_provider_models,
             prepare_generation,stream_llm,parse_prompt_pair,finalize_prompt_pair,build_workflow,inject_prompts,
-            submit_to_comfy,monitor_comfy_generation,start_generation,stop_generation,load_history,append_history,path_to_data_url,start_web_host,get_web_host_shared_settings,update_web_host_llm,update_web_host_generation_settings,stop_web_host
+            submit_to_comfy,monitor_comfy_generation,start_generation,stop_generation,history_revision,load_history,append_history,path_to_data_url,start_web_host,get_web_host_shared_settings,update_web_host_llm,update_web_host_generation_settings,stop_web_host
         ])
         .run(tauri::generate_context!())
         .expect("error while running Raphael Prompt Forge");
@@ -2428,6 +2448,24 @@ mod tests {
             b"{ invalid json",
             "malformed history must be preserved for recovery"
         );
+    }
+
+
+    #[test]
+    fn history_revision_changes_after_append_and_stays_stable_without_writes() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("generation-history.json");
+
+        let before = history_revision_file(&path).expect("revision for missing history");
+        append_history_file(&path, json!({"generation":1})).expect("append initial record");
+        let after = history_revision_file(&path).expect("revision after first write");
+        let stable = history_revision_file(&path).expect("revision without another write");
+
+        assert_ne!(before, after, "a new history record must change the revision");
+        assert_eq!(after, stable, "unchanged history must keep a stable revision");
+        append_history_file(&path, json!({"generation":2})).expect("append second record");
+        let second = history_revision_file(&path).expect("revision after second write");
+        assert_ne!(after, second, "a later append must change the revision");
     }
 
 }
