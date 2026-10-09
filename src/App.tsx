@@ -1233,6 +1233,8 @@ function App(){
     maxCharacterLoras:Math.max(1,Math.min(absoluteMaxLoraLimit,persistedGenerationSettings.maxCharacterLoras ?? defaultMaxCharacterLoras)),
   });
   const [selectedHistoryId,setSelectedHistoryId]=useState('');
+  const [selectedHistoryDetails,setSelectedHistoryDetails]=useState<GenerationRecord|null>(null);
+  const [selectedHistoryLoading,setSelectedHistoryLoading]=useState(false);
   const [historySettingsVisible,setHistorySettingsVisible]=useState(false);
   const [checkpointSearch,setCheckpointSearch]=useState('');
   const [loraSearch,setLoraSearch]=useState('');
@@ -1257,6 +1259,7 @@ function App(){
   // the whole archive (which can contain hundreds of MiB of base64 image data).
   const historyRevisionRef=useRef('');
   const historyLoadInFlight=useRef(false);
+  const selectedHistoryRequestRef=useRef('');
   const latestShowcaseImageRequest=useRef('');
 
   const selected=useMemo(
@@ -2347,7 +2350,10 @@ function App(){
       if(generatedImageDataUrl) historyImageCache.set(record.id,generatedImageDataUrl);
       historyRevisionRef.current=await apiInvoke<string>('history_revision').catch(()=>historyRevisionRef.current);
       setHistory(x=>[record,...x].slice(0,100));
+      selectedHistoryRequestRef.current=record.id;
       setSelectedHistoryId(record.id);
+      setSelectedHistoryDetails({...record,hasImage:Boolean(record.imageDataUrl)});
+      setSelectedHistoryLoading(false);
       setStage('recorded');
       setStageStatus('recorded','done');
       setToast(generationSucceeded
@@ -2372,21 +2378,41 @@ function App(){
     if(picked.path) setter(picked.path);
   }
 
+  function showHistoryList(){
+    selectedHistoryRequestRef.current='';
+    setSelectedHistoryId('');
+    setSelectedHistoryDetails(null);
+    setSelectedHistoryLoading(false);
+  }
+
   function openHistory(id:string){
+    selectedHistoryRequestRef.current=id;
     setSelectedHistoryId(id);
+    setSelectedHistoryDetails(null);
+    setSelectedHistoryLoading(true);
     setHistorySettingsVisible(false);
     setTab('history');
     setSettingsOpen(false);
-    const item=history.find(record=>record.id===id);
-    if(item?.hasImage && !item.imageDataUrl){
-      void fetchHistoryImageCached(id).then(imageDataUrl=>{
-        if(imageDataUrl){
-          setHistory(current=>current.map(record=>record.id===id
-            ? {...record,imageDataUrl}
-            : record));
-        }
-      }).catch(error=>setError('Could not load saved generation image: '+String(error)));
-    }
+    void apiInvoke<GenerationRecord>('load_history_item',{id})
+      .then(item=>{
+        if(selectedHistoryRequestRef.current!==id) return;
+        const summary=history.find(record=>record.id===id);
+        const fullItem:GenerationRecord={
+          ...item,
+          hasImage:Boolean(item.hasImage || item.imageDataUrl || summary?.hasImage),
+          imageDataUrl:undefined,
+        };
+        setSelectedHistoryDetails(fullItem);
+        setHistory(current=>current.map(record=>record.id===id
+          ? {...record,...fullItem,imageDataUrl:undefined,hasImage:Boolean(record.hasImage || fullItem.hasImage)}
+          : record));
+      })
+      .catch(error=>{
+        if(selectedHistoryRequestRef.current===id) setError('Could not load generation details: '+String(error));
+      })
+      .finally(()=>{
+        if(selectedHistoryRequestRef.current===id) setSelectedHistoryLoading(false);
+      });
   }
 
   function selectCheckpoint(id:string){
@@ -2453,7 +2479,7 @@ function App(){
     }
   }
 
-  const selectedHistory=selectedHistoryId ? history.find(item=>item.id===selectedHistoryId) : undefined;
+  const selectedHistory=selectedHistoryId && selectedHistoryDetails?.id===selectedHistoryId ? selectedHistoryDetails : undefined;
   const latestShowcaseRecord=history.find(item=>item.imageDataUrl || (item.hasImage && historyImageCache.has(item.id)));
   const latestShowcaseImage=resultImage || latestShowcaseRecord?.imageDataUrl
     || (latestShowcaseRecord ? historyImageCache.get(latestShowcaseRecord.id) : undefined);
@@ -2661,14 +2687,16 @@ function App(){
 
       {tab==='history' && <section className="history-panel history-detail-panel">
         <div className="history-mobile-nav">
-          <button className="ghost-btn" onClick={()=>{setTab('generate');setSelectedHistoryId('')}}><WandSparkles size={13}/> GENERATE</button>
+          <button className="ghost-btn" onClick={()=>{setTab('generate');showHistoryList()}}><WandSparkles size={13}/> GENERATE</button>
           <button className="ghost-btn" onClick={()=>void loadHistory(true)}><RefreshCw size={13}/> REFRESH HISTORY</button>
         </div>
-        {!selectedHistory ? (
+        {selectedHistoryId && (selectedHistoryLoading || !selectedHistory) ? (
+          <div className="empty-state"><RefreshCw size={22}/><div><b>LOADING GENERATION</b><span>Reading this record's prompts and settings. Its image loads separately.</span></div></div>
+        ) : !selectedHistory ? (
           <div className="empty-state"><History size={22}/><div><b>NO GENERATIONS</b><span>Completed generations will appear here.</span></div></div>
         ) : <>
           <div className="history-detail-head">
-            <button className="ghost-btn" onClick={()=>setSelectedHistoryId('')}>ALL HISTORY</button>
+            <button className="ghost-btn" onClick={showHistoryList}>ALL HISTORY</button>
             <div className="history-detail-meta">{new Date(selectedHistory.timestamp).toLocaleString()}</div>
           </div>
 
