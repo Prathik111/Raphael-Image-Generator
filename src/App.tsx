@@ -2154,34 +2154,51 @@ function App(){
     }
   }
 
-  async function autoGenerate(){
+  async function autoGenerate(mode:'random'|'fixed'='random'){
     if(autoGeneratingRef.current || busy || !selected || !library || !llm.model) return;
+    const fixedStackIds=[...selectedLoraIds];
+    if(mode==='fixed' && fixedStackIds.length===0){
+      setError('Select at least one LoRA before starting AUTO GENERATE · FIXED STACK.');
+      return;
+    }
     autoGeneratingRef.current=true;
     setAutoGenerating(true);
     setError('');
-    setToast('AUTO GENERATE STARTED');
+    setToast(mode==='fixed'
+      ? 'AUTO GENERATE STARTED · KEEPING SELECTED LORA STACK'
+      : 'AUTO GENERATE STARTED · RANDOMIZING LORA STACKS');
 
     let stackNumber=0;
     try{
       while(autoGeneratingRef.current){
         stackNumber+=1;
-        const stackIds=await rollStack();
+        // Fixed mode snapshots the selected stack once and never randomizes or
+        // mutates it. Random mode keeps the existing roll-after-success behavior.
+        const stackIds=mode==='fixed' ? fixedStackIds : await rollStack();
         if(!stackIds || !autoGeneratingRef.current) break;
 
         let attempt=0;
         let success=false;
         while(autoGeneratingRef.current && !success){
           attempt+=1;
-          setToast('AUTO STACK '+stackNumber+' · ATTEMPT '+attempt+' · GENERATING');
+          setToast(
+            (mode==='fixed' ? 'FIXED STACK' : 'RANDOM STACK')+' '+stackNumber+
+            ' · ATTEMPT '+attempt+' · GENERATING'
+          );
           success=await generate(stackIds);
           if(!success && autoGeneratingRef.current){
-            setToast('AUTO STACK '+stackNumber+' · ATTEMPT '+attempt+' FAILED · RETRYING SAME LORA STACK');
+            setToast(
+              (mode==='fixed' ? 'FIXED STACK' : 'RANDOM STACK')+' '+stackNumber+
+              ' · ATTEMPT '+attempt+' FAILED · RETRYING SAME LORA STACK'
+            );
             await new Promise(resolve=>setTimeout(resolve,250));
           }
         }
 
         if(success && autoGeneratingRef.current){
-          setToast('AUTO STACK '+stackNumber+' COMPLETE · SELECTING NEXT RANDOM LORA STACK');
+          setToast(mode==='fixed'
+            ? 'IMAGE '+stackNumber+' COMPLETE · REUSING THE SAME SELECTED LORA STACK'
+            : 'AUTO STACK '+stackNumber+' COMPLETE · SELECTING NEXT RANDOM LORA STACK');
         }
       }
     }catch(e){
@@ -2919,8 +2936,11 @@ function App(){
             {busy
               ? <button className="secondary-btn active" onClick={()=>void stopGeneration()}><X size={15}/> STOP GENERATION</button>
               : <button className="primary-btn" disabled={autoGenerating || !selected || !llm.model} onClick={()=>void generate()}><Play size={15}/> GENERATE</button>}
-            <button className={'secondary-btn ' + (autoGenerating ? 'active' : '')} disabled={!selected || !llm.model} onClick={()=>autoGenerating ? stopAutoGenerate() : void autoGenerate()}>
-              <Sparkles size={14}/> {autoGenerating ? 'STOP AUTO' : 'AUTO GENERATE'}
+            <button className={'secondary-btn ' + (autoGenerating ? 'active' : '')} disabled={!selected || !llm.model || (autoGenerating && false)} onClick={()=>autoGenerating ? stopAutoGenerate() : void autoGenerate('random')}>
+              <Sparkles size={14}/> {autoGenerating ? 'STOP AUTO' : 'AUTO RANDOM STACK'}
+            </button>
+            <button className={'secondary-btn ' + (autoGenerating ? 'active' : '')} disabled={!selected || !llm.model || (!autoGenerating && selectedLoraIds.length===0)} onClick={()=>autoGenerating ? stopAutoGenerate() : void autoGenerate('fixed')}>
+              <Sparkles size={14}/> {autoGenerating ? 'STOP AUTO' : 'AUTO FIXED STACK'}
             </button>
           </div>
         </section>
