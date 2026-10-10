@@ -1326,20 +1326,6 @@ function isCharacterLoraForCheckpoint(
   );
 }
 
-function promptNeedsExpansion(pair:PromptPair){
-  const positive=pair.positive_prompt.trim();
-  const words=positive.split(/\s+/).filter(Boolean).length;
-  const clauses=positive.split(',').map(x=>x.trim()).filter(Boolean).length;
-  const sceneSignals=[
-    /pose|posture|standing|sitting|lying|walking|kneeling/i,
-    /expression|smile|frown|serious|calm|happy|sad|angry|confident|gaze|looking/i,
-    /background|environment|scene|room|street|forest|sky|wall|landscape|interior|exterior/i,
-    /lighting|light|shadow|rim light|sunlight|moonlight|neon/i,
-    /camera|close-up|medium shot|wide shot|portrait|three-quarter|full body|perspective/i,
-  ].filter(pattern=>pattern.test(positive)).length;
-  return words < 90 || clauses < 18 || sceneSignals < 4;
-}
-
 function App(){
   const persistedGenerationSettings=loadPersistedGenerationSettings();
   const initialLlm: LlmSettings={
@@ -2432,12 +2418,9 @@ function App(){
       );
       let validationAttempt=0;
 
-      while((!validation.valid || promptNeedsExpansion(rawPair)) && validationAttempt<generationDraft.tagGenerationRetries){
+      while(!validation.valid && validationAttempt<generationDraft.tagGenerationRetries){
         validationAttempt+=1;
-        const deficiency=[
-          ...validation.errors,
-          ...(promptNeedsExpansion(rawPair) ? ['prompt does not contain enough scene coverage or visual detail'] : []),
-        ];
+        const deficiency=[...validation.errors];
         setTagValidation('TAG VALIDATION FAILED — REDO '+validationAttempt+'/'+generationDraft.tagGenerationRetries+': '+deficiency.join(' · '));
         streamText.current='';
         flushSync(()=>setStream(''));
@@ -2473,10 +2456,10 @@ function App(){
         );
       }
 
-      if(!validation.valid || promptNeedsExpansion(rawPair)){
+      if(!validation.valid){
         throw new Error(
           'LLM prompt validation failed after '+generationDraft.tagGenerationRetries+' repair attempts: '+
-          [...validation.errors, ...(promptNeedsExpansion(rawPair) ? ['insufficient scene coverage'] : [])].join(' · ')
+          validation.errors.join(' · ')
         );
       }
 
