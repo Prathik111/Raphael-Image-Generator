@@ -2936,7 +2936,7 @@ function App(){
             {busy
               ? <button className="secondary-btn active" onClick={()=>void stopGeneration()}><X size={15}/> STOP GENERATION</button>
               : <button className="primary-btn" disabled={autoGenerating || !selected || !llm.model} onClick={()=>void generate()}><Play size={15}/> GENERATE</button>}
-            <button className={'secondary-btn ' + (autoGenerating ? 'active' : '')} disabled={!selected || !llm.model || (autoGenerating && false)} onClick={()=>autoGenerating ? stopAutoGenerate() : void autoGenerate('random')}>
+            <button className={'secondary-btn ' + (autoGenerating ? 'active' : '')} disabled={!selected || !llm.model} onClick={()=>autoGenerating ? stopAutoGenerate() : void autoGenerate('random')}>
               <Sparkles size={14}/> {autoGenerating ? 'STOP AUTO' : 'AUTO RANDOM STACK'}
             </button>
             <button className={'secondary-btn ' + (autoGenerating ? 'active' : '')} disabled={!selected || !llm.model || (!autoGenerating && selectedLoraIds.length===0)} onClick={()=>autoGenerating ? stopAutoGenerate() : void autoGenerate('fixed')}>
